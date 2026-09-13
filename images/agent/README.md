@@ -101,11 +101,21 @@ docker run --rm -v /tmp/fixture:/fixture:ro \
   `tmpfs`/volumes; `/workspace` is already expected to be a writable, per-run volume (§24).
 - No credential, token, or `.env` file is baked into any layer; none was used to build or test
   this image.
-- `GITHUB_TOKEN` never reaches a log line, a URL, or the disk (§14). git receives it through
-  `GIT_ASKPASS`, so it is absent from the remote URL, from `.git/config` and from git's own
-  error output when a clone fails; the GitHub API receives it in a request header; and both
-  scripts disable shell tracing, which would otherwise expand it into the trace. The
-  `credentials.bats` tests assert this on the success path and on every failure path.
+- `GITHUB_TOKEN` never reaches a log line, a URL, the process table, or the disk (§14):
+  - git receives it through `GIT_ASKPASS`, so it is absent from the remote URL, from
+    `.git/config` and from git's own error output when a clone fails;
+  - the GitHub API receives it as a header read from stdin (`curl --config -`), never as a
+    command-line argument, which the process table would expose for the length of the request;
+  - `$HOME` is writable here by design, so config a run inherits is treated as hostile:
+    `curl --disable` ignores a `~/.curlrc` that asks for `verbose`, `GIT_TRACE_REDACT=1`
+    keeps the header out of a trace the environment turns on, and an emptied
+    `credential.helper` stops a planted `~/.gitconfig` persisting the token;
+  - both scripts disable shell tracing, which would otherwise expand the token into it;
+  - output relayed from git, curl and jq is re-emitted through the prefixed logger, so no
+    failure path prints an unprefixed line either (§31).
+
+  `credentials.bats` and `askpass.bats` assert all of this on the success path and on every
+  failure path, including a real credential challenge from a local server.
 
 ## Versions pinned in this image
 

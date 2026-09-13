@@ -10,7 +10,10 @@ ifeq ($(BATS),)
 BATS := $(LOCAL_BATS)
 endif
 
-SHELL_SOURCES := bootstrap/sandcastle-run bootstrap/sandcastle-askpass
+# The two bootstrap executables, which carry no suffix because they are installed as
+# commands, plus every *.sh under this directory so a later one cannot go unlinted.
+SHELL_SOURCES := bootstrap/sandcastle-run bootstrap/sandcastle-askpass \
+	$(shell find . -name '*.sh' -not -path './.bats/*')
 
 .PHONY: check lint test build
 check: lint test build

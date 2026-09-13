@@ -73,9 +73,14 @@ runBranch() {
 }
 
 # git writes progress and errors itself; buffer them so they can be re-emitted with a prefix.
+#
+# GIT_TRACE_REDACT=1 and the emptied credential.helper are git's twins of curl's --disable:
+# they stop an environment that turns tracing on from dumping the Authorization header, and a
+# planted ~/.gitconfig from persisting the token to disk (§14).
 runGit() {
     local output status=0
-    output=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$ASKPASS" git "$@" 2>&1) || status=$?
+    output=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$ASKPASS" GIT_TRACE_REDACT=1 \
+        git -c credential.helper= "$@" 2>&1) || status=$?
     logLines GIT "$output"
     return "$status"
 }
@@ -130,22 +135,29 @@ checkoutRepository() {
 # Writes the issue context outside the checkout so it never shows up in the agent's diff.
 fetchIssueContext() {
     local url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues/$GITHUB_ISSUE_NUMBER"
-    local response status=0
+    local response context status=0
 
     log GITHUB "Fetching issue #$GITHUB_ISSUE_NUMBER from $GITHUB_API_URL"
-    # The token goes in a header rather than the URL; curl is quiet on success, so on failure
-    # $response holds its error text, which never contains the header value.
-    response=$(curl --silent --show-error --fail --location --max-time 30 \
-        --header "Accept: application/vnd.github+json" \
-        --header "X-GitHub-Api-Version: 2022-11-28" \
-        --header "Authorization: Bearer $GITHUB_TOKEN" \
-        "$url" 2>&1) || status=$?
+    # --disable must come first: without it a ~/.curlrc holding "verbose" would dump the
+    # Authorization header into the log, and $HOME is writable in this image (§14).
+    # The header itself arrives on stdin rather than in argv, where the process table would
+    # expose it for the length of the request; printf is a builtin, so it has no argv either.
+    # curl is quiet on success, so on failure $response holds its error text, which never
+    # contains the header value.
+    response=$(printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" |
+        curl --disable --config - \
+            --silent --show-error --fail --location --max-time 30 \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "$url" 2>&1) || status=$?
     if [[ $status -ne 0 ]]; then
         logLines GITHUB "$response"
         die "Could not fetch issue #$GITHUB_ISSUE_NUMBER (curl exit $status)"
     fi
 
-    jq --arg run_id "$SANDCASTLE_RUN_ID" --arg repository "$GITHUB_REPOSITORY" \
+    # A 200 that is not the JSON expected still has to fail through the prefixed log (§31),
+    # so capture jq's own parse errors instead of letting them reach stderr unprefixed.
+    context=$(jq --arg run_id "$SANDCASTLE_RUN_ID" --arg repository "$GITHUB_REPOSITORY" \
         '{
             run_id: $run_id,
             repository: $repository,
@@ -153,8 +165,12 @@ fetchIssueContext() {
             title: .title,
             body: (.body // ""),
             labels: [.labels[].name]
-        }' <<<"$response" >"$ISSUE_CONTEXT_FILE" ||
+        }' <<<"$response" 2>&1) || status=$?
+    if [[ $status -ne 0 ]]; then
+        logLines GITHUB "$context"
         die "Could not parse the GitHub issue payload"
+    fi
+    printf '%s\n' "$context" >"$ISSUE_CONTEXT_FILE"
 
     log GITHUB "Issue #$GITHUB_ISSUE_NUMBER: $(jq -r '.title' "$ISSUE_CONTEXT_FILE")"
     log GITHUB "Wrote issue context to $ISSUE_CONTEXT_FILE"

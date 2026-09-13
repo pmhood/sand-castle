@@ -42,9 +42,42 @@ refuteToken() {
     refuteToken
 }
 
+@test "the token never reaches the logs through a planted ~/.curlrc" {
+    # $HOME is writable in this image, so a curlrc holding "verbose" would otherwise dump the
+    # Authorization header of every request into the run log.
+    local home="$BATS_TEST_TMPDIR/home"
+    mkdir -p "$home"
+    printf 'verbose\n' >"$home/.curlrc"
+
+    run env HOME="$home" "$SANDCASTLE_RUN"
+    [ "$status" -eq 0 ]
+    refuteToken
+}
+
 @test "the token never reaches the logs when the shell is asked to trace" {
     run env SHELLOPTS=xtrace "$SANDCASTLE_RUN"
     [ "$status" -eq 0 ]
+    refuteToken
+}
+
+@test "the token is never passed in curl's arguments" {
+    # Arguments are readable from the process table for the length of the request, so the
+    # header has to arrive on stdin. A shim records what the real curl was actually called with.
+    local bin="$BATS_TEST_TMPDIR/bin" argv="$BATS_TEST_TMPDIR/curl-argv.log" realCurl
+    realCurl=$(command -v curl)
+    mkdir -p "$bin"
+    cat >"$bin/curl" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >>'$argv'
+exec '$realCurl' "\$@"
+EOF
+    chmod +x "$bin/curl"
+
+    run env PATH="$bin:$PATH" "$SANDCASTLE_RUN"
+    [ "$status" -eq 0 ]
+    [ -s "$argv" ]
+
+    run cat "$argv"
     refuteToken
 }
 

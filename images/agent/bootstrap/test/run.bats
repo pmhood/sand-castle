@@ -94,15 +94,32 @@ setup() {
     [[ $output == *'Clone of octo/demo failed'* ]]
 }
 
-@test "every log line carries a section 31 prefix" {
+@test "a payload that is not json fails the run with the GITHUB prefix" {
+    GITHUB_ISSUE_NUMBER=8 runBootstrap
+    [ "$status" -eq 1 ]
+    [[ $output == *'[GITHUB] parse error'* ]]
+    [[ $output == *'Could not parse the GitHub issue payload'* ]]
+    [ ! -e "$SANDCASTLE_WORKSPACE/issue-context.json" ]
+}
+
+@test "every log line carries a section 31 prefix, on success and on every failure" {
     runBootstrap
     [ "$status" -eq 0 ]
+    assertPrefixedLines
 
-    local line
-    while IFS= read -r line; do
-        [[ $line =~ ^\[(SANDCASTLE|GIT|ENGRAM|CLAUDE|TEST|GITHUB)\]\  ]] || {
-            echo "unprefixed log line: $line"
-            return 1
-        }
-    done <<<"$output"
+    GITHUB_SERVER_URL="file://$BATS_TEST_TMPDIR/absent" runBootstrap
+    [ "$status" -eq 1 ]
+    assertPrefixedLines
+
+    GITHUB_ISSUE_NUMBER=404 runBootstrap
+    [ "$status" -eq 1 ]
+    assertPrefixedLines
+
+    GITHUB_ISSUE_NUMBER=8 runBootstrap
+    [ "$status" -eq 1 ]
+    assertPrefixedLines
+
+    run env -u AGENT "$SANDCASTLE_RUN"
+    [ "$status" -eq 1 ]
+    assertPrefixedLines
 }

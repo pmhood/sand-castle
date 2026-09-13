@@ -27,6 +27,9 @@ makeFixtures() {
   "labels": [{ "name": "bug" }, { "name": "effort:medium" }]
 }
 JSON
+
+    # Issue 8 is what a proxy or an error page returns with a 200: a body that is not JSON.
+    printf '<html>upstream proxy error</html>\n' >"$root/api/repos/octo/demo/issues/8"
 }
 
 # Exports a complete, valid environment pointed at the fixtures in $1.
@@ -46,4 +49,43 @@ exportRunEnvironment() {
 # Runs the bootstrap as the container does: as an executable, not a sourced library.
 runBootstrap() {
     run "$SANDCASTLE_RUN" "$@"
+}
+
+# §31 holds for every line of $output, including what the bootstrap relays from git and jq.
+assertPrefixedLines() {
+    local line
+    [[ -n $output ]] || return 0
+    while IFS= read -r line; do
+        [[ $line =~ ^\[(SANDCASTLE|GIT|ENGRAM|CLAUDE|TEST|GITHUB)\]\  ]] || {
+            echo "unprefixed log line: $line"
+            return 1
+        }
+    done <<<"$output"
+}
+
+# Points GITHUB_SERVER_URL at a host that demands credentials, so that git actually calls
+# sandcastle-askpass. Sets AUTH_LOG (headers the server saw) and SERVER_PID (for teardown).
+startChallengingGitServer() {
+    local dir="$1/challenge" portFile
+    mkdir -p "$dir"
+    portFile="$dir/port"
+    AUTH_LOG="$dir/auth.log"
+
+    python3 "$BOOTSTRAP_DIR/test/fixtures/unauthorized-git-server.py" "$portFile" "$AUTH_LOG" &
+    SERVER_PID=$!
+
+    local attempt
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [[ -s $portFile ]] && break
+        sleep 0.05
+    done
+    [[ -s $portFile ]] || return 1
+
+    export GITHUB_SERVER_URL="http://127.0.0.1:$(cat "$portFile")"
+}
+
+stopChallengingGitServer() {
+    [[ -n ${SERVER_PID:-} ]] || return 0
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
 }

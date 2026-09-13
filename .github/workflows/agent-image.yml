@@ -1,0 +1,46 @@
+name: Agent image
+
+on:
+  pull_request:
+    paths:
+      - "images/agent/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t sandcastle-agent:ci images/agent
+
+      - name: Run as non-root and exit 0
+        run: docker run --rm sandcastle-agent:ci
+
+      - name: Tool versions resolve on PATH
+        run: |
+          docker run --rm --entrypoint bash sandcastle-agent:ci -c '
+            set -euo pipefail
+            id -u
+            git --version
+            jq --version
+            node --version
+            python3 --version
+            claude --version
+            codex --version
+          '
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run shellcheck
+        run: |
+          shopt -s globstar nullglob
+          files=(images/agent/**/*.sh images/agent/sandcastle-run)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no shell scripts found under images/agent"
+            exit 0
+          fi
+          shellcheck "${files[@]}"

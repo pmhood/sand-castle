@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Entrypoint contract for the Sand Castle agent sandbox image.
+#
+# This is a placeholder. The real bootstrap (workspace prep, repository checkout, agent
+# invocation, result reporting -- see docs/ARCHITECTURE.md §12) lands in a follow-up issue.
+# This issue only establishes that the image's ENTRYPOINT is this executable.
+set -euo pipefail
+
+echo "[SANDCASTLE] bootstrap not yet implemented"
+exit 0

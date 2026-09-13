@@ -1,0 +1,5 @@
+# Build context is images/agent. Keep credentials and editor/OS cruft out of every layer.
+.env
+*.env
+.DS_Store
+README.md

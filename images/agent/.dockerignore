@@ -3,3 +3,9 @@
 *.env
 .DS_Store
 README.md
+
+# Development-only: the checks that run around the image, never inside it.
+.bats/
+.gitignore
+Makefile
+bootstrap/test/

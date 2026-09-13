@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# Sand Castle agent sandbox bootstrap (docs/ARCHITECTURE.md §12).
+#
+# Owns run orchestration inside the container so that orchestration never has to be expressed
+# as a giant Kubernetes command. Every step below is a small named function and `main` reads
+# top to bottom.
+#
+# Required environment:
+#   SANDCASTLE_RUN_ID     unique run identifier; also the run branch suffix (§25)
+#   GITHUB_REPOSITORY     owner/repo the run works in
+#   GITHUB_ISSUE_NUMBER   issue the run is about
+#   AGENT                 claude | codex (§27)
+#   GITHUB_TOKEN          scoped token used to clone and to read the issue (§17)
+#
+# Optional environment:
+#   GITHUB_SERVER_URL     git host, default https://github.com
+#   GITHUB_API_URL        GitHub API root, default https://api.github.com
+#   SANDCASTLE_WORKSPACE  workspace root, default /workspace (§24)
+#
+# Credential values are never logged and never written to disk (§14). The token reaches git
+# through GIT_ASKPASS (see sandcastle-askpass) rather than through the remote URL.
+#
+# Not implemented here: the agent invocation (runAgent is a stub), pushing the branch, the
+# /internal/runs/:id/result callback (§29/§30, Phase 4) and Engram (§41, Phase 7).
+
+set -euo pipefail
+# Tracing expands $GITHUB_TOKEN into the trace, so keep it off however this was invoked (§14).
+set +x
+
+readonly REQUIRED_ENV_VARS=(
+    SANDCASTLE_RUN_ID
+    GITHUB_REPOSITORY
+    GITHUB_ISSUE_NUMBER
+    AGENT
+    GITHUB_TOKEN
+)
+
+readonly GIT_USER_NAME='Sand Castle agent'
+readonly GIT_USER_EMAIL='sandcastle-agent@users.noreply.github.com'
+
+GITHUB_SERVER_URL=${GITHUB_SERVER_URL:-https://github.com}
+GITHUB_API_URL=${GITHUB_API_URL:-https://api.github.com}
+WORKSPACE=${SANDCASTLE_WORKSPACE:-/workspace}
+REPO_DIR="$WORKSPACE/repo"
+ISSUE_CONTEXT_FILE="$WORKSPACE/issue-context.json"
+# Installed next to this script, both in the image and in the repository.
+ASKPASS="$(dirname "${BASH_SOURCE[0]}")/sandcastle-askpass"
+
+# Every line of output carries one of the §31 prefixes: SANDCASTLE, GIT, ENGRAM, CLAUDE,
+# TEST, GITHUB. ENGRAM is reserved for Phase 7 and unused today.
+log() {
+    local prefix=$1
+    shift
+    printf '[%s] %s\n' "$prefix" "$*"
+}
+
+# Prefix output that a subprocess wrote for itself, so §31 holds for git and curl too.
+logLines() {
+    local prefix=$1 text=${2-} line
+    [[ -n $text ]] || return 0
+    while IFS= read -r line; do
+        log "$prefix" "$line"
+    done <<<"$text"
+}
+
+die() {
+    log SANDCASTLE "$*" >&2
+    exit 1
+}
+
+runBranch() {
+    printf '%s' "sandcastle/$SANDCASTLE_RUN_ID"
+}
+
+# git writes progress and errors itself; buffer them so they can be re-emitted with a prefix.
+runGit() {
+    local output status=0
+    output=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$ASKPASS" git "$@" 2>&1) || status=$?
+    logLines GIT "$output"
+    return "$status"
+}
+
+# Messages name the offending variable but never its value (§14).
+validateEnvironment() {
+    local var missing=()
+    for var in "${REQUIRED_ENV_VARS[@]}"; do
+        [[ -n ${!var-} ]] || missing+=("$var")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        die "Missing required environment variable(s): ${missing[*]}"
+    fi
+
+    # These three are interpolated into URLs and a git ref, so check their shape here.
+    [[ $SANDCASTLE_RUN_ID =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+        die "SANDCASTLE_RUN_ID must start with a letter or digit and contain only letters, digits, '.', '_' or '-'"
+    [[ $GITHUB_REPOSITORY =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] ||
+        die "GITHUB_REPOSITORY must be in owner/repo form"
+    [[ $GITHUB_ISSUE_NUMBER =~ ^[1-9][0-9]*$ ]] ||
+        die "GITHUB_ISSUE_NUMBER must be a positive integer"
+
+    case $AGENT in
+        claude | codex) ;;
+        *) die "AGENT must be 'claude' or 'codex'" ;;
+    esac
+
+    log SANDCASTLE "Environment validated"
+}
+
+prepareWorkspace() {
+    mkdir -p "$REPO_DIR"
+    log SANDCASTLE "Workspace ready at $WORKSPACE"
+}
+
+checkoutRepository() {
+    local remote="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+    local branch
+    branch=$(runBranch)
+
+    log GIT "Cloning $GITHUB_REPOSITORY from $GITHUB_SERVER_URL"
+    runGit clone --quiet "$remote" "$REPO_DIR" || die "Clone of $GITHUB_REPOSITORY failed"
+
+    runGit -C "$REPO_DIR" config user.name "$GIT_USER_NAME" || die "Could not set git user.name"
+    runGit -C "$REPO_DIR" config user.email "$GIT_USER_EMAIL" || die "Could not set git user.email"
+
+    # The run ID, not the issue number, keeps the branch unique across reruns (§25).
+    runGit -C "$REPO_DIR" checkout --quiet -b "$branch" || die "Could not create branch $branch"
+    log GIT "On branch $branch in $REPO_DIR"
+}
+
+# Writes the issue context outside the checkout so it never shows up in the agent's diff.
+fetchIssueContext() {
+    local url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues/$GITHUB_ISSUE_NUMBER"
+    local response status=0
+
+    log GITHUB "Fetching issue #$GITHUB_ISSUE_NUMBER from $GITHUB_API_URL"
+    # The token goes in a header rather than the URL; curl is quiet on success, so on failure
+    # $response holds its error text, which never contains the header value.
+    response=$(curl --silent --show-error --fail --location --max-time 30 \
+        --header "Accept: application/vnd.github+json" \
+        --header "X-GitHub-Api-Version: 2022-11-28" \
+        --header "Authorization: Bearer $GITHUB_TOKEN" \
+        "$url" 2>&1) || status=$?
+    if [[ $status -ne 0 ]]; then
+        logLines GITHUB "$response"
+        die "Could not fetch issue #$GITHUB_ISSUE_NUMBER (curl exit $status)"
+    fi
+
+    jq --arg run_id "$SANDCASTLE_RUN_ID" --arg repository "$GITHUB_REPOSITORY" \
+        '{
+            run_id: $run_id,
+            repository: $repository,
+            number: .number,
+            title: .title,
+            body: (.body // ""),
+            labels: [.labels[].name]
+        }' <<<"$response" >"$ISSUE_CONTEXT_FILE" ||
+        die "Could not parse the GitHub issue payload"
+
+    log GITHUB "Issue #$GITHUB_ISSUE_NUMBER: $(jq -r '.title' "$ISSUE_CONTEXT_FILE")"
+    log GITHUB "Wrote issue context to $ISSUE_CONTEXT_FILE"
+}
+
+# Stub: the Claude/Codex invocation (§27) is the follow-up issue.
+runAgent() {
+    log SANDCASTLE "Agent invocation for '$AGENT' is not implemented yet; skipping"
+    return 0
+}
+
+# Phase 4 replaces this log with POST /internal/runs/:id/result (§29/§30).
+reportResult() {
+    local status=$1 outcome=completed
+    [[ $status -eq 0 ]] || outcome=failed
+
+    log SANDCASTLE "Run $SANDCASTLE_RUN_ID $outcome"
+    log SANDCASTLE "  repository=$GITHUB_REPOSITORY issue=#$GITHUB_ISSUE_NUMBER agent=$AGENT"
+    log SANDCASTLE "  branch=$(runBranch) exit_code=$status"
+    log SANDCASTLE "  branch not pushed and no result callback sent; both are later phases"
+    return "$status"
+}
+
+main() {
+    validateEnvironment
+    log SANDCASTLE "Run $SANDCASTLE_RUN_ID started"
+    prepareWorkspace
+    checkoutRepository
+    fetchIssueContext
+
+    local status=0
+    runAgent || status=$?
+    reportResult "$status"
+}
+
+# Sourced by the test suite; executed in the container.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
+fi

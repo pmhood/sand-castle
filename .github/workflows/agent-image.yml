@@ -14,9 +14,6 @@ jobs:
       - name: Build image
         run: docker build -t sandcastle-agent:ci images/agent
 
-      - name: Run as non-root and exit 0
-        run: docker run --rm sandcastle-agent:ci
-
       - name: Tool versions resolve on PATH
         run: |
           docker run --rm --entrypoint bash sandcastle-agent:ci -c '
@@ -28,7 +25,32 @@ jobs:
             python3 --version
             claude --version
             codex --version
+            command -v sandcastle-run
           '
+
+      - name: Entrypoint fails fast without required environment
+        run: |
+          if docker run --rm sandcastle-agent:ci; then
+            echo "expected a non-zero exit with no environment set"
+            exit 1
+          fi
+
+      - name: Clone a public repository and write the issue context
+        run: |
+          # A dummy token: github.com serves a public clone anonymously, and the issue payload
+          # comes from a mounted fixture, so this runs with no credential of any kind.
+          mkdir -p fixture/repos/octocat/Hello-World/issues
+          echo '{"number":1,"title":"Fixture issue","body":"body","labels":[]}' \
+            > fixture/repos/octocat/Hello-World/issues/1
+          docker run --rm \
+            -v "$PWD/fixture:/fixture:ro" \
+            -e SANDCASTLE_RUN_ID=run-ci-$GITHUB_RUN_ID \
+            -e GITHUB_REPOSITORY=octocat/Hello-World \
+            -e GITHUB_ISSUE_NUMBER=1 \
+            -e AGENT=claude \
+            -e GITHUB_TOKEN=not-a-real-token \
+            -e GITHUB_API_URL=file:///fixture \
+            sandcastle-agent:ci
 
   shellcheck:
     runs-on: ubuntu-latest
@@ -36,11 +58,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run shellcheck
-        run: |
-          shopt -s globstar nullglob
-          files=(images/agent/**/*.sh images/agent/sandcastle-run)
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "no shell scripts found under images/agent"
-            exit 0
-          fi
-          shellcheck "${files[@]}"
+        run: make -C images/agent lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the bootstrap test suite
+        run: make -C images/agent test

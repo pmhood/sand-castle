@@ -84,7 +84,7 @@ far each row was taken, because that is what decides whether Phase 3 can rely on
 | `claude` | Subscription OAuth token (`claude setup-token`) | `CLAUDE_CODE_OAUTH_TOKEN` | documented |
 | `claude` | API key | `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) | exercised |
 | `claude` | Prior `claude auth login` | `~/.claude/.credentials.json` (`CLAUDE_CONFIG_DIR` moves it) | documented |
-| `codex` | API key | `CODEX_API_KEY` | exercised |
+| `codex` | API key | `CODEX_API_KEY` (its own `login --with-api-key` help says `OPENAI_API_KEY`, which is not enough) | exercised |
 | `codex` | ChatGPT access token | `CODEX_ACCESS_TOKEN` | documented |
 | `codex` | Prior `codex login` | `$CODEX_HOME/auth.json`, default `~/.codex/auth.json` | exercised |
 

@@ -65,17 +65,21 @@ resetWorkspace() {
 # handed -- writes a line to stdout and one to stderr, then exits with AGENT_CLI_EXIT. The
 # suite can therefore exercise a whole run without a credential, a network or a real agent.
 #
-# Called at the bottom of this file rather than from a setup(), so that no test in any file
-# can reach a real agent binary on the developer's PATH: a test that does not load this file
-# has no bootstrap to run either. BATS_TEST_TMPDIR is already the test's own directory here.
+# Called at the bottom of this file rather than from a setup(), so that loading this file is
+# itself what puts the stand-ins on PATH: every file in the suite loads it, and the stand-ins
+# are in place before setup_file, setup and every test body. That is a convention, not a
+# guarantee -- a file that reached sandcastle-run without loading this one would run against
+# whatever `claude` the developer has on PATH -- so keep `load helpers` in every test file.
 installFakeAgentClis() {
-    local bin name credentialVar
+    local root bin name credentialVar
 
-    # bats sources every file once to collect test names before running anything, and there is
-    # no test directory yet at that point -- nor any test body to protect.
-    [[ -n ${BATS_TEST_TMPDIR-} ]] || return 0
-    bin="$BATS_TEST_TMPDIR/bin"
-    AGENT_CLI_RECORD="$BATS_TEST_TMPDIR/agent-cli"
+    # bats runs three kinds of pass, and the directory to use differs: gathering test names
+    # (neither variable set, and no test code to protect), setup_file/teardown_file (only
+    # BATS_FILE_TMPDIR, and they can call the bootstrap), and a test body (both set).
+    root=${BATS_TEST_TMPDIR:-${BATS_FILE_TMPDIR-}}
+    [[ -n $root ]] || return 0
+    bin="$root/bin"
+    AGENT_CLI_RECORD="$root/agent-cli"
     mkdir -p "$bin" "$AGENT_CLI_RECORD"
 
     for name in claude codex; do
@@ -141,6 +145,6 @@ stopChallengingGitServer() {
     wait "$SERVER_PID" 2>/dev/null || true
 }
 
-# Runs as every test file loads this one, before any setup() and before any test body, so the
-# agent CLIs a run can reach are always the stand-ins and never the real thing (§13).
+# Runs as every test file loads this one, before its setup_file, its setup and any test body,
+# so the agent CLIs a run can reach are the stand-ins and not the real thing (§13).
 installFakeAgentClis

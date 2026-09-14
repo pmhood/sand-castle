@@ -202,6 +202,155 @@ credential in the environment ([agent credentials](#agent-credentials)).
   [agent credentials](#agent-credentials). `agent.bats` asserts that the credential reaches
   the CLI and reaches nothing else.
 
+## Running the Phase 1 smoke test
+
+Phase 1's success criterion (§35) is that Claude CLI works non-interactively inside the
+container with supplied OAuth credentials. The smoke harness at `scripts/smoke.sh` makes that
+manual run trivial to perform and unambiguous to interpret.
+
+```sh
+make -C images/agent smoke
+```
+
+The harness accepts repository and issue number as arguments or environment variables, requires
+credentials for the selected agent, and runs the image against that real target. If anything
+fails, the operator can instantly see whether the failure was their credential, their token,
+the network, the repository, or the CLI — not a failure in the bootstrap.
+
+### Credentials
+
+Set one of the required credentials for your chosen agent. The harness reads from environment
+variables first; if they are not set, it looks for a git-ignored file at `images/.env.local`.
+
+**Claude Code CLI (via `AGENT=claude`, the default):**
+
+Set one of:
+- `CLAUDE_CODE_OAUTH_TOKEN` — subscription OAuth token (`claude setup-token` prints one)
+- `ANTHROPIC_API_KEY` — API key (less preferred; see [agent credentials](#agent-credentials))
+- Prior login via `claude auth login` writes to `~/.claude/.credentials.json`
+
+```sh
+export CLAUDE_CODE_OAUTH_TOKEN="sk-..."
+make -C images/agent smoke
+```
+
+or save to `images/.env.local`:
+
+```sh
+echo 'CLAUDE_CODE_OAUTH_TOKEN=sk-...' >images/.env.local
+make -C images/agent smoke
+```
+
+**Codex CLI (via `AGENT=codex`):**
+
+Set one of:
+- `CODEX_API_KEY` — OpenAI API key
+- `CODEX_ACCESS_TOKEN` — ChatGPT access token (`codex login --with-access-token` sets this)
+- Prior login via `codex login` writes to `~/.codex/auth.json`
+
+```sh
+export CODEX_API_KEY="sk-..."
+export AGENT=codex
+make -C images/agent smoke
+```
+
+### Target repository and issue
+
+Provide a real public or private repository and issue number you can push to. The agent will
+clone the repository, create a branch and read the issue (that is all Phase 1 does; pushing,
+commenting and result callbacks are later phases).
+
+```sh
+export GITHUB_REPOSITORY=owner/repo
+export GITHUB_ISSUE_NUMBER=123
+make -C images/agent smoke
+```
+
+or:
+
+```sh
+make -C images/agent smoke -- owner/repo 123
+```
+
+If not set, the `GITHUB_ISSUE_NUMBER` must be a valid public issue (or the token must have
+access to it). The agent modifies nothing in this phase, so pointing at a non-existent issue
+is safe; you will see an error about the issue not existing.
+
+### GitHub token
+
+The harness also needs a GitHub token to clone the repository and read the issue. Set
+`GITHUB_TOKEN` if you have one, or the script will prompt for it interactively.
+
+```sh
+export GITHUB_TOKEN="ghp_..."
+export CLAUDE_CODE_OAUTH_TOKEN="sk-..."
+make -C images/agent smoke -- owner/repo 123
+```
+
+### Successful run
+
+On success, the container output ends with:
+
+```
+[SANDCASTLE] Run smoke-<timestamp>-<random> completed
+[SANDCASTLE]   repository=owner/repo issue=#123 agent=claude
+[SANDCASTLE]   branch=sandcastle/smoke-<timestamp>-<random> exit_code=0
+[SANDCASTLE]   branch not pushed and no result callback sent; both are later phases
+```
+
+This means:
+- The container started successfully
+- The CLI authenticated and read the repository and issue
+- The harness proved the end-to-end OAuth path works
+- No credentials were leaked (see [Security notes](#security-notes) for what the bootstrap
+  asserts about this)
+
+The branch created in the test repository is harmless: the operator can delete it manually,
+or leave it for the next run (each run gets a new unique branch).
+
+### Failure modes
+
+**Missing credentials:**
+
+```
+[SMOKE] ERROR: Missing required credentials for agent 'claude'. Set one of: ...
+```
+
+Set a credential (above) and try again.
+
+**Network or token issue:**
+
+```
+[GIT] fatal: could not read Username for 'https://github.com': ...
+```
+
+or:
+
+```
+[GITHUB] Could not fetch issue #123 (curl exit 22)
+```
+
+Check your `GITHUB_TOKEN` and that you have network access to github.com.
+
+**Invalid OAuth token:**
+
+The agent CLI will receive the token and attempt to authenticate. If the token is invalid or
+expired, you will see an error from the CLI:
+
+```
+[CLAUDE] Error: ...
+```
+
+Verify your credential is correct and unexpired, then try again.
+
+### Credential file security
+
+The `images/.env.local` file is git-ignored and never committed. You are responsible for:
+- Keeping it private and never committing it
+- Removing it or rotating your credentials before sharing your machine
+- Being aware that `$HOME` is writable in the container, so a stale dotfile can interfere with
+  the run (see [Security notes](#security-notes) for what protections the bootstrap has)
+
 ## Versions pinned in this image
 
 - Base image: `node:24-bookworm-slim`, pinned by tag and digest (see `Dockerfile`).

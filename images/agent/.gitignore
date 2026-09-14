@@ -1,2 +1,5 @@
 # bats-core installed on demand by `make test`.
 /.bats/
+
+# Credentials for manual smoke test runs (git-ignored; operator's responsibility to keep safe).
+../.env.local

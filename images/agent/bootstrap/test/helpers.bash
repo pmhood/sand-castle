@@ -6,6 +6,9 @@ SANDCASTLE_RUN="$BOOTSTRAP_DIR/sandcastle-run"
 # A token value that must never reach stdout, stderr or the checkout (§14).
 readonly FAKE_TOKEN='fake-token-3f8b21c7'
 
+# The agent CLI's own credential: the runner must hand it to the CLI and never log it (§13).
+readonly FAKE_AGENT_CREDENTIAL='fake-agent-credential-9d4e71a2'
+
 # A local git host and GitHub API stand-in, so the suite needs no network and no credential.
 # file:// URLs exercise the same clone and curl code paths the real hosts do.
 makeFixtures() {
@@ -51,12 +54,64 @@ runBootstrap() {
     run "$SANDCASTLE_RUN" "$@"
 }
 
-# §31 holds for every line of $output, including what the bootstrap relays from git and jq.
+# A run clones into a directory it expects to be empty, so a test that runs the bootstrap a
+# second time -- once per agent, say -- has to give it a fresh workspace first.
+resetWorkspace() {
+    rm -rf "$SANDCASTLE_WORKSPACE"
+}
+
+# Puts fake `claude` and `codex` binaries on PATH. Each records how it was called -- its
+# arguments, the prompt it read from stdin, its working directory and the credential it was
+# handed -- writes a line to stdout and one to stderr, then exits with AGENT_CLI_EXIT. The
+# suite can therefore exercise a whole run without a credential, a network or a real agent.
+#
+# Called at the bottom of this file rather than from a setup(), so that loading this file is
+# itself what puts the stand-ins on PATH: every file in the suite loads it, and the stand-ins
+# are in place before setup_file, setup and every test body. That is a convention, not a
+# guarantee -- a file that reached sandcastle-run without loading this one would run against
+# whatever `claude` the developer has on PATH -- so keep `load helpers` in every test file.
+installFakeAgentClis() {
+    local root bin name credentialVar
+
+    # bats runs three kinds of pass, and the directory to use differs: gathering test names
+    # (neither variable set, and no test code to protect), setup_file/teardown_file (only
+    # BATS_FILE_TMPDIR, and they can call the bootstrap), and a test body (both set).
+    root=${BATS_TEST_TMPDIR:-${BATS_FILE_TMPDIR-}}
+    [[ -n $root ]] || return 0
+    bin="$root/bin"
+    AGENT_CLI_RECORD="$root/agent-cli"
+    mkdir -p "$bin" "$AGENT_CLI_RECORD"
+
+    for name in claude codex; do
+        # The credential each CLI actually reads from its environment; see bootstrap/runners/.
+        case $name in
+            claude) credentialVar=CLAUDE_CODE_OAUTH_TOKEN ;;
+            codex) credentialVar=CODEX_API_KEY ;;
+        esac
+        cat >"$bin/$name" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >'$AGENT_CLI_RECORD/$name.argv'
+printf '%s\n' "\$PWD" >'$AGENT_CLI_RECORD/$name.cwd'
+printf '%s' "\${$credentialVar-}" >'$AGENT_CLI_RECORD/$name.credential'
+cat >'$AGENT_CLI_RECORD/$name.prompt'
+printf 'fake $name read the prompt\n'
+printf 'fake $name wrote to stderr\n' >&2
+exit "\${AGENT_CLI_EXIT:-0}"
+EOF
+        chmod +x "$bin/$name"
+    done
+
+    export AGENT_CLI_EXIT=0
+    export PATH="$bin:$PATH"
+}
+
+# §31 holds for every line of $output, including what the bootstrap relays from git, jq and
+# the agent CLI. CODEX is the Codex twin of the §31 CLAUDE prefix.
 assertPrefixedLines() {
     local line
     [[ -n $output ]] || return 0
     while IFS= read -r line; do
-        [[ $line =~ ^\[(SANDCASTLE|GIT|ENGRAM|CLAUDE|TEST|GITHUB)\]\  ]] || {
+        [[ $line =~ ^\[(SANDCASTLE|GIT|ENGRAM|CLAUDE|CODEX|TEST|GITHUB)\]\  ]] || {
             echo "unprefixed log line: $line"
             return 1
         }
@@ -89,3 +144,7 @@ stopChallengingGitServer() {
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
 }
+
+# Runs as every test file loads this one, before its setup_file, its setup and any test body,
+# so the agent CLIs a run can reach are the stand-ins and not the real thing (§13).
+installFakeAgentClis

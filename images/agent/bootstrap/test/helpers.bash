@@ -33,10 +33,6 @@ JSON
 
     # Issue 8 is what a proxy or an error page returns with a 200: a body that is not JSON.
     printf '<html>upstream proxy error</html>\n' >"$root/api/repos/octo/demo/issues/8"
-
-    # A real agent CLI on the developer's PATH must never be what a run reaches, so the
-    # fixtures include a stand-in for each one.
-    installFakeAgentClis
 }
 
 # Exports a complete, valid environment pointed at the fixtures in $1.
@@ -68,8 +64,17 @@ resetWorkspace() {
 # arguments, the prompt it read from stdin, its working directory and the credential it was
 # handed -- writes a line to stdout and one to stderr, then exits with AGENT_CLI_EXIT. The
 # suite can therefore exercise a whole run without a credential, a network or a real agent.
+#
+# Called at the bottom of this file rather than from a setup(), so that no test in any file
+# can reach a real agent binary on the developer's PATH: a test that does not load this file
+# has no bootstrap to run either. BATS_TEST_TMPDIR is already the test's own directory here.
 installFakeAgentClis() {
-    local bin="$BATS_TEST_TMPDIR/bin" name credentialVar
+    local bin name credentialVar
+
+    # bats sources every file once to collect test names before running anything, and there is
+    # no test directory yet at that point -- nor any test body to protect.
+    [[ -n ${BATS_TEST_TMPDIR-} ]] || return 0
+    bin="$BATS_TEST_TMPDIR/bin"
     AGENT_CLI_RECORD="$BATS_TEST_TMPDIR/agent-cli"
     mkdir -p "$bin" "$AGENT_CLI_RECORD"
 
@@ -135,3 +140,7 @@ stopChallengingGitServer() {
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
 }
+
+# Runs as every test file loads this one, before any setup() and before any test body, so the
+# agent CLIs a run can reach are always the stand-ins and never the real thing (§13).
+installFakeAgentClis

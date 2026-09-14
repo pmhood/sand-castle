@@ -231,7 +231,7 @@ buildPrompt() {
 # invoked lives in its own file, and the prompt, the working directory and the exit code are
 # shared. An AGENT with no runner fails instead of quietly defaulting to Claude.
 runAgent() {
-    local prompt status=0
+    local prompt runner complaint status=0
 
     # The known agents are matched, not assembled from $AGENT, so an unexpected value fails
     # here instead of turning into a path.
@@ -240,11 +240,20 @@ runAgent() {
         *) die "No runner for AGENT '$AGENT'; expected 'claude' or 'codex'" ;;
     esac
 
-    # A runner that cannot be read has to fail through the prefixed log like anything else,
-    # rather than leaving bash to complain about it in its own words (§31).
+    # The runners ship with the image, so a runner that will not load is a packaging fault.
+    # Say which fault it is, and relay bash's own complaint through the prefixed log rather
+    # than letting it reach stderr unprefixed (§31). Syntax is checked in a separate process
+    # because a `source` that fails half way has already run the half that did not.
+    runner="$RUNNERS_DIR/$AGENT.sh"
+    [[ -r $runner ]] || die "Could not load the $AGENT runner from $runner"
+    complaint=$(bash -n "$runner" 2>&1) || status=$?
+    if [[ $status -ne 0 ]]; then
+        logLines SANDCASTLE "$complaint"
+        die "The $AGENT runner at $runner is not valid bash"
+    fi
+
     # shellcheck source=bootstrap/runners/claude.sh
-    source "$RUNNERS_DIR/$AGENT.sh" 2>/dev/null ||
-        die "Could not load the $AGENT runner from $RUNNERS_DIR"
+    source "$runner" || die "The $AGENT runner at $runner failed to load"
 
     prompt=$(buildPrompt) || die "Could not build the agent prompt from $ISSUE_CONTEXT_FILE"
 

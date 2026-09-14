@@ -70,17 +70,29 @@ that section names).
 ### Agent credentials
 
 What each installed CLI accepts, for the `AgentCredentialProvider` that will inject it
-(§15, §16, Phase 3). Verified against the versions pinned in the `Dockerfile` by running each
-CLI in this image with a deliberately invalid credential and watching where it ended up.
+(§15, §16, Phase 3), against the versions pinned in the `Dockerfile`. The last column says how
+far each row was taken, because that is what decides whether Phase 3 can rely on it:
 
-| `AGENT` | Credential | How it is supplied |
-| --- | --- | --- |
-| `claude` | Subscription OAuth token (`claude setup-token`) | `CLAUDE_CODE_OAUTH_TOKEN` |
-| `claude` | API key | `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) |
-| `claude` | Prior `claude auth login` | `~/.claude/.credentials.json` (`CLAUDE_CONFIG_DIR` moves it) |
-| `codex` | API key | `CODEX_API_KEY` |
-| `codex` | ChatGPT access token | `CODEX_ACCESS_TOKEN` |
-| `codex` | Prior `codex login` | `$CODEX_HOME/auth.json`, default `~/.codex/auth.json` |
+- **exercised** -- the CLI was run in this image with a deliberately invalid credential
+  supplied this way, and the credential demonstrably reached the provider (the rejection names
+  it) or the CLI demonstrably got as far as the provider;
+- **documented** -- the CLI names it as an authentication source in its own help or binary,
+  but no run has confirmed it end to end. Worth a check before Phase 3 depends on it.
+
+| `AGENT` | Credential | How it is supplied | Confidence |
+| --- | --- | --- | --- |
+| `claude` | Subscription OAuth token (`claude setup-token`) | `CLAUDE_CODE_OAUTH_TOKEN` | documented |
+| `claude` | API key | `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) | exercised |
+| `claude` | Prior `claude auth login` | `~/.claude/.credentials.json` (`CLAUDE_CONFIG_DIR` moves it) | documented |
+| `codex` | API key | `CODEX_API_KEY` | exercised |
+| `codex` | ChatGPT access token | `CODEX_ACCESS_TOKEN` | documented |
+| `codex` | Prior `codex login` | `$CODEX_HOME/auth.json`, default `~/.codex/auth.json` | exercised |
+
+The two OAuth rows -- the ones the vertical slice actually wants (§13) -- are the documented
+ones, because no OAuth credential was available here. Each is named by its CLI as an auth
+source: Claude Code's error lists `ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN,
+CLAUDE_CODE_OAUTH_TOKEN` as the accepted set, and `codex login --with-access-token` reads the
+token that `CODEX_ACCESS_TOKEN` supplies. Proving them is the smoke harness's job.
 
 Two differences matter to whoever injects these:
 

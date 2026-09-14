@@ -42,6 +42,20 @@ setup() {
     [[ $output == *'[SANDCASTLE] Could not load the claude runner'* ]]
 }
 
+@test "a runner that is not valid bash reports what bash objected to" {
+    source "$SANDCASTLE_RUN"
+
+    RUNNERS_DIR="$BATS_TEST_TMPDIR/broken"
+    mkdir -p "$RUNNERS_DIR"
+    printf 'invokeAgent() {\n' >"$RUNNERS_DIR/claude.sh"
+
+    run runAgent
+    [ "$status" -eq 1 ]
+    # bash's own complaint is relayed through the prefixed log, not swallowed.
+    [[ $output == *'[SANDCASTLE]'*'syntax error'* ]]
+    [[ $output == *'[SANDCASTLE] The claude runner at'*'is not valid bash'* ]]
+}
+
 @test "each CLI is invoked non-interactively, with the prompt out of its arguments" {
     runBootstrap
     [ "$status" -eq 0 ]

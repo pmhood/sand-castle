@@ -6,6 +6,9 @@ SANDCASTLE_RUN="$BOOTSTRAP_DIR/sandcastle-run"
 # A token value that must never reach stdout, stderr or the checkout (§14).
 readonly FAKE_TOKEN='fake-token-3f8b21c7'
 
+# The agent CLI's own credential: the runner must hand it to the CLI and never log it (§13).
+readonly FAKE_AGENT_CREDENTIAL='fake-agent-credential-9d4e71a2'
+
 # A local git host and GitHub API stand-in, so the suite needs no network and no credential.
 # file:// URLs exercise the same clone and curl code paths the real hosts do.
 makeFixtures() {
@@ -30,6 +33,10 @@ JSON
 
     # Issue 8 is what a proxy or an error page returns with a 200: a body that is not JSON.
     printf '<html>upstream proxy error</html>\n' >"$root/api/repos/octo/demo/issues/8"
+
+    # A real agent CLI on the developer's PATH must never be what a run reaches, so the
+    # fixtures include a stand-in for each one.
+    installFakeAgentClis
 }
 
 # Exports a complete, valid environment pointed at the fixtures in $1.
@@ -51,12 +58,51 @@ runBootstrap() {
     run "$SANDCASTLE_RUN" "$@"
 }
 
-# §31 holds for every line of $output, including what the bootstrap relays from git and jq.
+# A run clones into a directory it expects to be empty, so a test that runs the bootstrap a
+# second time -- once per agent, say -- has to give it a fresh workspace first.
+resetWorkspace() {
+    rm -rf "$SANDCASTLE_WORKSPACE"
+}
+
+# Puts fake `claude` and `codex` binaries on PATH. Each records how it was called -- its
+# arguments, the prompt it read from stdin, its working directory and the credential it was
+# handed -- writes a line to stdout and one to stderr, then exits with AGENT_CLI_EXIT. The
+# suite can therefore exercise a whole run without a credential, a network or a real agent.
+installFakeAgentClis() {
+    local bin="$BATS_TEST_TMPDIR/bin" name credentialVar
+    AGENT_CLI_RECORD="$BATS_TEST_TMPDIR/agent-cli"
+    mkdir -p "$bin" "$AGENT_CLI_RECORD"
+
+    for name in claude codex; do
+        # The credential each CLI actually reads from its environment; see bootstrap/runners/.
+        case $name in
+            claude) credentialVar=CLAUDE_CODE_OAUTH_TOKEN ;;
+            codex) credentialVar=CODEX_API_KEY ;;
+        esac
+        cat >"$bin/$name" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >'$AGENT_CLI_RECORD/$name.argv'
+printf '%s\n' "\$PWD" >'$AGENT_CLI_RECORD/$name.cwd'
+printf '%s' "\${$credentialVar-}" >'$AGENT_CLI_RECORD/$name.credential'
+cat >'$AGENT_CLI_RECORD/$name.prompt'
+printf 'fake $name read the prompt\n'
+printf 'fake $name wrote to stderr\n' >&2
+exit "\${AGENT_CLI_EXIT:-0}"
+EOF
+        chmod +x "$bin/$name"
+    done
+
+    export AGENT_CLI_EXIT=0
+    export PATH="$bin:$PATH"
+}
+
+# §31 holds for every line of $output, including what the bootstrap relays from git, jq and
+# the agent CLI. CODEX is the Codex twin of the §31 CLAUDE prefix.
 assertPrefixedLines() {
     local line
     [[ -n $output ]] || return 0
     while IFS= read -r line; do
-        [[ $line =~ ^\[(SANDCASTLE|GIT|ENGRAM|CLAUDE|TEST|GITHUB)\]\  ]] || {
+        [[ $line =~ ^\[(SANDCASTLE|GIT|ENGRAM|CLAUDE|CODEX|TEST|GITHUB)\]\  ]] || {
             echo "unprefixed log line: $line"
             return 1
         }

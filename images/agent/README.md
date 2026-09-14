@@ -14,6 +14,7 @@ images/agent/
 └── bootstrap/
     ├── sandcastle-run       the bootstrap itself
     ├── sandcastle-askpass   GIT_ASKPASS helper; keeps the token out of URLs and logs
+    ├── runners/             one file per agent CLI: how it is invoked, and nothing else
     └── test/                bats-core suite
 ```
 
@@ -23,9 +24,26 @@ Validate the environment, create `/workspace/repo`, clone the repository and cre
 branch `sandcastle/<run-id>` (§25), fetch the issue into `/workspace/issue-context.json`, run
 the agent, then log a result summary and exit with the agent's exit code.
 
-Invoking the agent is still a stub, and the branch is neither pushed nor reported back:
-pushing, commenting and `POST /internal/runs/:id/result` (§29/§30) are later phases, as is
-Engram (§41). The `[ENGRAM]` log prefix is reserved and unused.
+The branch is neither pushed nor reported back: pushing, commenting and
+`POST /internal/runs/:id/result` (§29/§30) are later phases, as is Engram (§41). The
+`[ENGRAM]` log prefix is reserved and unused.
+
+### Running the agent
+
+`AGENT` selects a runner in `bootstrap/runners/`; an `AGENT` with no runner fails the run
+rather than defaulting to Claude. The prompt is built once, from the issue context, and is the
+same whichever CLI receives it: repository, issue number, title, body, labels, run ID and the
+requirements list §26 spells out. Only the invocation differs (§27):
+
+| `AGENT` | Invocation | Log prefix |
+| --- | --- | --- |
+| `claude` | `claude --print --permission-mode bypassPermissions`, prompt on stdin | `[CLAUDE]` |
+| `codex` | `codex exec --dangerously-bypass-approvals-and-sandbox --color never -`, prompt on stdin | `[CODEX]` |
+
+Both run with the checkout as their working directory, stream their output into the run log a
+line at a time, and hand back their exit code unchanged. Permissions and sandboxing are
+bypassed *inside* the CLI because the container is itself the sandbox (§11, §50); the prompt
+travels on stdin, never in arguments the process table would expose.
 
 ### Environment
 
@@ -40,8 +58,41 @@ Engram (§41). The `[ENGRAM]` log prefix is reserved and unused.
 | `GITHUB_API_URL` | no | GitHub API root, default `https://api.github.com` |
 | `SANDCASTLE_WORKSPACE` | no | Workspace root, default `/workspace` (§24) |
 
+The agent's own credential is not in that table: the bootstrap never reads it. It is passed
+through to the CLI in the environment, which is the whole of §13 and §52 -- the CLI talks to
+its provider, Sand Castle does not. See [agent credentials](#agent-credentials) for the shape
+each CLI expects.
+
 Every log line is prefixed with one of `[SANDCASTLE]`, `[GIT]`, `[ENGRAM]`, `[CLAUDE]`,
-`[TEST]`, `[GITHUB]` (§31).
+`[CODEX]`, `[TEST]`, `[GITHUB]` (§31; `[CODEX]` is the Codex twin of the `[CLAUDE]` prefix
+that section names).
+
+### Agent credentials
+
+What each installed CLI accepts, for the `AgentCredentialProvider` that will inject it
+(§15, §16, Phase 3). Verified against the versions pinned in the `Dockerfile` by running each
+CLI in this image with a deliberately invalid credential and watching where it ended up.
+
+| `AGENT` | Credential | How it is supplied |
+| --- | --- | --- |
+| `claude` | Subscription OAuth token (`claude setup-token`) | `CLAUDE_CODE_OAUTH_TOKEN` |
+| `claude` | API key | `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) |
+| `claude` | Prior `claude auth login` | `~/.claude/.credentials.json` (`CLAUDE_CONFIG_DIR` moves it) |
+| `codex` | API key | `CODEX_API_KEY` |
+| `codex` | ChatGPT access token | `CODEX_ACCESS_TOKEN` |
+| `codex` | Prior `codex login` | `$CODEX_HOME/auth.json`, default `~/.codex/auth.json` |
+
+Two differences matter to whoever injects these:
+
+- The CLIs do not agree. Claude Code takes an OAuth token straight from the environment;
+  Codex `0.154.0` does **not** read `OPENAI_API_KEY` (a run with only that variable set sent
+  no credential at all) -- it wants `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, or an `auth.json`
+  that `codex login --with-api-key` / `--with-access-token` writes from stdin. A mounted
+  secret therefore needs `CODEX_HOME` pointed at its directory.
+- A CLI can print a credential the provider rejects. With an invalid key, Codex relays
+  OpenAI's `Incorrect API key provided: <key>` to its own stderr, and that reaches the run
+  log. Nothing in the bootstrap logs a credential, but a rejected one can still surface this
+  way; the fix belongs upstream of the log, in injecting a valid credential.
 
 ## Build and check
 
@@ -81,15 +132,19 @@ A run with no environment fails fast, naming the variables it needs and exiting 
 docker run --rm sandcastle-agent:dev
 ```
 
-A full run against a public repository, with the issue payload served from a local fixture so
-that no credential is needed (the clone is anonymous; the token is only ever offered when the
-server challenges):
+A full run against a public repository, with the issue payload served from a local fixture and
+a fake CLI standing in for the agent, so that no credential is needed (the clone is anonymous;
+the token is only ever offered when the server challenges). The run ends with the fake's exit
+code, which is the whole path from environment to agent proved without one:
 
 ```sh
-mkdir -p /tmp/fixture/repos/octocat/Hello-World/issues
+mkdir -p /tmp/fixture/repos/octocat/Hello-World/issues /tmp/fakebin
 echo '{"number":1,"title":"Fixture issue","body":"body","labels":[]}' \
   > /tmp/fixture/repos/octocat/Hello-World/issues/1
-docker run --rm -v /tmp/fixture:/fixture:ro \
+printf '#!/bin/sh\necho "argv: $*"\ncat\nexit 42\n' > /tmp/fakebin/claude
+chmod 755 /tmp/fakebin/claude
+docker run --rm -v /tmp/fixture:/fixture:ro -v /tmp/fakebin:/fakebin:ro \
+  -e PATH=/fakebin:/usr/local/bin:/usr/bin:/bin \
   -e SANDCASTLE_RUN_ID=run-local-001 \
   -e GITHUB_REPOSITORY=octocat/Hello-World \
   -e GITHUB_ISSUE_NUMBER=1 \
@@ -98,6 +153,9 @@ docker run --rm -v /tmp/fixture:/fixture:ro \
   -e GITHUB_API_URL=file:///fixture \
   sandcastle-agent:dev
 ```
+
+Drop the `/fakebin` mount and the `PATH` override to run the real CLI, which then needs a real
+credential in the environment ([agent credentials](#agent-credentials)).
 
 ## Security notes
 
@@ -125,6 +183,12 @@ docker run --rm -v /tmp/fixture:/fixture:ro \
 
   `credentials.bats` and `askpass.bats` assert all of this on the success path and on every
   failure path, including a real credential challenge from a local server.
+- The agent's own credential is never read, copied or logged by the bootstrap either. The CLI
+  inherits it from the environment and talks to its provider itself (§13, §52); the prompt
+  travels on stdin, so nothing the run sends the agent appears in the process table. A CLI can
+  still print a credential its provider rejected -- see
+  [agent credentials](#agent-credentials). `agent.bats` asserts that the credential reaches
+  the CLI and reaches nothing else.
 
 ## Versions pinned in this image
 

@@ -17,11 +17,16 @@
 #   GITHUB_API_URL        GitHub API root, default https://api.github.com
 #   SANDCASTLE_WORKSPACE  workspace root, default /workspace (§24)
 #
+# The selected agent's own credential is supplied by the caller (§15/§16) and is never read
+# here: the CLI inherits this process's environment and talks to its provider itself, which is
+# the distinction §13 and §52 exist to preserve. bootstrap/runners/ documents the shape each
+# CLI expects.
+#
 # Credential values are never logged and never written to disk (§14). The token reaches git
 # through GIT_ASKPASS (see sandcastle-askpass) rather than through the remote URL.
 #
-# Not implemented here: the agent invocation (runAgent is a stub), pushing the branch, the
-# /internal/runs/:id/result callback (§29/§30, Phase 4) and Engram (§41, Phase 7).
+# Not implemented here: pushing the branch, the /internal/runs/:id/result callback (§29/§30,
+# Phase 4) and Engram (§41, Phase 7).
 
 set -euo pipefail
 # Tracing expands $GITHUB_TOKEN into the trace, so keep it off however this was invoked (§14).
@@ -45,9 +50,11 @@ REPO_DIR="$WORKSPACE/repo"
 ISSUE_CONTEXT_FILE="$WORKSPACE/issue-context.json"
 # Installed next to this script, both in the image and in the repository.
 ASKPASS="$(dirname "${BASH_SOURCE[0]}")/sandcastle-askpass"
+RUNNERS_DIR="$(dirname "${BASH_SOURCE[0]}")/runners"
 
 # Every line of output carries one of the §31 prefixes: SANDCASTLE, GIT, ENGRAM, CLAUDE,
-# TEST, GITHUB. ENGRAM is reserved for Phase 7 and unused today.
+# TEST, GITHUB, plus CODEX as the Codex twin of CLAUDE. ENGRAM is reserved for Phase 7 and
+# unused today.
 log() {
     local prefix=$1
     shift
@@ -61,6 +68,16 @@ logLines() {
     while IFS= read -r line; do
         log "$prefix" "$line"
     done <<<"$text"
+}
+
+# Prefix a subprocess's output as it arrives. Unlike logLines, which prefixes text already
+# collected, this reads a stream, so a long-running agent appears in the run log while it is
+# still working (§31). A trailing line without a newline is logged too.
+logStream() {
+    local prefix=$1 line
+    while IFS= read -r line || [[ -n $line ]]; do
+        log "$prefix" "$line"
+    done
 }
 
 die() {
@@ -176,10 +193,65 @@ fetchIssueContext() {
     log GITHUB "Wrote issue context to $ISSUE_CONTEXT_FILE"
 }
 
-# Stub: the Claude/Codex invocation (§27) is the follow-up issue.
+# §26: the agent is handed structured context, not "solve issue #7". Both runners send exactly
+# this, because the prompt belongs to the task and not to the CLI that receives it.
+buildPrompt() {
+    jq -r '
+        [
+            "You are working inside a Sand Castle agent sandbox.",
+            "",
+            "Run ID:",
+            .run_id,
+            "",
+            "Repository:",
+            .repository,
+            "",
+            "GitHub Issue:",
+            "#\(.number) \(.title)",
+            "",
+            "Labels:",
+            (if (.labels | length) > 0 then (.labels | join(", ")) else "(none)" end),
+            "",
+            "Task:",
+            (if .body == "" then "(the issue has no description)" else .body end),
+            "",
+            "Requirements:",
+            "",
+            "- inspect the repository before changing code",
+            "- implement the issue",
+            "- run relevant tests",
+            "- do not modify unrelated code",
+            "- leave the repository in a clean working state",
+            "- summarize the work performed"
+        ] | join("\n")
+    ' "$ISSUE_CONTEXT_FILE"
+}
+
+# §27: the adapter boundary. Choosing the CLI is all that happens here; how each one is
+# invoked lives in its own file, and the prompt, the working directory and the exit code are
+# shared. An AGENT with no runner fails instead of quietly defaulting to Claude.
 runAgent() {
-    log SANDCASTLE "Agent invocation for '$AGENT' is not implemented yet; skipping"
-    return 0
+    local prompt status=0
+
+    # The known agents are matched, not assembled from $AGENT, so an unexpected value fails
+    # here instead of turning into a path.
+    case $AGENT in
+        claude | codex) ;;
+        *) die "No runner for AGENT '$AGENT'; expected 'claude' or 'codex'" ;;
+    esac
+
+    # A runner that cannot be read has to fail through the prefixed log like anything else,
+    # rather than leaving bash to complain about it in its own words (§31).
+    # shellcheck source=bootstrap/runners/claude.sh
+    source "$RUNNERS_DIR/$AGENT.sh" 2>/dev/null ||
+        die "Could not load the $AGENT runner from $RUNNERS_DIR"
+
+    prompt=$(buildPrompt) || die "Could not build the agent prompt from $ISSUE_CONTEXT_FILE"
+
+    # The agent works in the checkout, not in the workspace root that holds the run's own
+    # files; the subshell keeps that move away from the steps that follow.
+    (cd "$REPO_DIR" && invokeAgent "$prompt") || status=$?
+    return "$status"
 }
 
 # Phase 4 replaces this log with POST /internal/runs/:id/result (§29/§30).

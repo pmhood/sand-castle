@@ -37,6 +37,11 @@ RUN mkdir -p /workspace && chown node:node /workspace
 # The bootstrap (§12) and its GIT_ASKPASS helper, which must stay next to it.
 COPY --chmod=755 bootstrap/sandcastle-run bootstrap/sandcastle-askpass /usr/local/bin/
 
+# The per-agent runners (§27). The bootstrap sources them from a "runners" directory beside
+# itself, so the layout is the same here as it is in the repository. --chmod also applies to
+# the directory it creates, and a 644 directory cannot be entered, hence 755 here.
+COPY --chmod=755 bootstrap/runners/ /usr/local/bin/runners/
+
 # HOME is writable for agent/npm config and cache (~/.claude, ~/.codex, ~/.npm); everything
 # else in the image is written only at build time, so the root filesystem can otherwise run
 # read-only (§50). See images/agent/README.md for the writable paths a `--read-only` run needs.

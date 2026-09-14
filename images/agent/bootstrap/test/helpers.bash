@@ -9,6 +9,12 @@ readonly FAKE_TOKEN='fake-token-3f8b21c7'
 # The agent CLI's own credential: the runner must hand it to the CLI and never log it (§13).
 readonly FAKE_AGENT_CREDENTIAL='fake-agent-credential-9d4e71a2'
 
+# Neutralize the GitHub Actions environment so the test suite is hermetic.
+# CI sets GITHUB_REPOSITORY, GITHUB_SERVER_URL, and GITHUB_API_URL; tests rely on these
+# being absent so they can exercise different configurations. Unset them now so all tests
+# inherit a clean slate, then each test can set them explicitly.
+unset GITHUB_REPOSITORY GITHUB_ISSUE_NUMBER GITHUB_TOKEN GITHUB_SERVER_URL GITHUB_API_URL
+
 # A local git host and GitHub API stand-in, so the suite needs no network and no credential.
 # file:// URLs exercise the same clone and curl code paths the real hosts do.
 makeFixtures() {

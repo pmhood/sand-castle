@@ -1,8 +1,8 @@
 # Sand Castle agent sandbox image.
 #
-# One immutable image serving both agents (Claude Code CLI and Codex CLI). It contains no
-# orchestration logic yet -- see /usr/local/bin/sandcastle-run, which is a placeholder until the
-# bootstrap issue lands. See docs/ARCHITECTURE.md §11, §24, §50.
+# One immutable image serving both agents (Claude Code CLI and Codex CLI). Run orchestration
+# lives in /usr/local/bin/sandcastle-run (see bootstrap/), not in the Kubernetes command.
+# See docs/ARCHITECTURE.md §11, §12, §24, §50.
 
 # Pin by tag *and* digest so this build is reproducible even if the tag is retagged upstream.
 # node:24-bookworm-slim -- Node.js 24.x is the current LTS ("Krypton").
@@ -34,7 +34,8 @@ RUN npm install -g --no-fund --no-audit \
 # creating a second uid-1000 account.
 RUN mkdir -p /workspace && chown node:node /workspace
 
-COPY --chmod=755 sandcastle-run /usr/local/bin/sandcastle-run
+# The bootstrap (§12) and its GIT_ASKPASS helper, which must stay next to it.
+COPY --chmod=755 bootstrap/sandcastle-run bootstrap/sandcastle-askpass /usr/local/bin/
 
 # HOME is writable for agent/npm config and cache (~/.claude, ~/.codex, ~/.npm); everything
 # else in the image is written only at build time, so the root filesystem can otherwise run

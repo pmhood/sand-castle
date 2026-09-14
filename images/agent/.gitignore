@@ -1,0 +1,2 @@
+# bats-core installed on demand by `make test`.
+/.bats/

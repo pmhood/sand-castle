@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# GIT_ASKPASS helper for the Sand Castle bootstrap (docs/ARCHITECTURE.md §14).
+#
+# git calls this with the prompt it would have shown ("Username for ...", "Password for ...")
+# and reads the answer from stdout. Answering here, instead of embedding the token in the
+# remote URL, keeps the credential out of the URL, out of .git/config, out of the process
+# arguments, and -- the case that matters most -- out of git's own error output when a clone
+# or fetch fails.
+#
+# git only asks when the server challenges, so a public repository is still cloned
+# anonymously and no credential is handed over at all.
+
+set -euo pipefail
+# This script exists to print a credential; tracing it would print that credential (§14).
+set +x
+
+case "${1-}" in
+    Username*) printf '%s\n' 'x-access-token' ;;
+    *) printf '%s\n' "${GITHUB_TOKEN-}" ;;
+esac

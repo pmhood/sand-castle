@@ -63,8 +63,11 @@ setup() {
         unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CONFIG_DIR GITHUB_TOKEN
         '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1
     "
+    # Property: validation fails with non-zero exit and docker is not invoked.
     [ "$status" -ne 0 ]
-    [[ $output == *"Missing required credentials"* ]]
+    # Match stable fragment: the error message names at least one required credential
+    # (exact wording may change, but "GITHUB_TOKEN" will always be required).
+    [[ $output == *"GITHUB_TOKEN"* ]]
     # CRITICAL: Verify docker was NOT invoked (no argv record created).
     # This assertion enforces that validation runs BEFORE docker is touched.
     [[ ! -f "$DOCKER_RECORD/docker.argv" ]]
@@ -76,8 +79,11 @@ setup() {
         export HOME=\$(mktemp -d)
         '$SMOKE_SCRIPT' owner/repo 123 codex 2>&1
     "
+    # Property: validation fails with non-zero exit and docker is not invoked.
     [ "$status" -ne 0 ]
-    [[ $output == *"Missing required credentials"* ]]
+    # Match stable fragment: the error message names at least one required credential
+    # (exact wording may change, but "GITHUB_TOKEN" will always be required).
+    [[ $output == *"GITHUB_TOKEN"* ]]
     # CRITICAL: Verify docker was NOT invoked (no argv record created).
     # This assertion enforces that validation runs BEFORE docker is touched.
     [[ ! -f "$DOCKER_RECORD/docker.argv" ]]

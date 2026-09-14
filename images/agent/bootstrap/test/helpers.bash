@@ -145,6 +145,36 @@ stopChallengingGitServer() {
     wait "$SERVER_PID" 2>/dev/null || true
 }
 
+# Installs a fake docker binary on PATH that records invocations but does not run containers.
+# This prevents smoke.sh tests from invoking the real docker with real credentials (§14 and
+# the quota leak in earlier project work). The fake records argv in DOCKER_RECORD, simulating
+# docker commands without side effects.
+installFakeDocker() {
+    local root bin
+    root=${BATS_TEST_TMPDIR:-${BATS_FILE_TMPDIR-}}
+    [[ -n $root ]] || return 0
+    bin="$root/bin"
+    DOCKER_RECORD="$root/docker-record"
+    mkdir -p "$bin" "$DOCKER_RECORD"
+
+    cat >"$bin/docker" <<'EOF'
+#!/usr/bin/env bash
+# Fake docker: record the invocation and exit cleanly without running anything.
+printf '%s\n' "$@" >"$DOCKER_RECORD/docker.argv"
+# Simulate `docker image inspect` behavior for the "image already exists" path.
+if [[ "$1" == "image" && "$2" == "inspect" ]]; then
+    exit 0
+fi
+# Simulate `docker build` or `docker run` with a success exit.
+exit 0
+EOF
+    chmod +x "$bin/docker"
+    export DOCKER_RECORD="$DOCKER_RECORD"
+    export PATH="$bin:$PATH"
+}
+
 # Runs as every test file loads this one, before its setup_file, its setup and any test body,
 # so the agent CLIs a run can reach are the stand-ins and not the real thing (§13).
+# Also install fake docker to prevent smoke.sh tests from running real containers (§14).
 installFakeAgentClis
+installFakeDocker

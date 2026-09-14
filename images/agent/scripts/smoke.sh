@@ -82,10 +82,13 @@ sourceCredentialFile() {
     set +a
 }
 
-# Validate that the required credentials are present for the selected agent.
+# Validate that the required credentials are present for the selected agent and GitHub.
 # Credentials are never logged; only their variable names are validated (§14).
 validateCredentials() {
     local status=0 missing=()
+
+    # GitHub token is required to clone and read the issue.
+    [[ -n "${GITHUB_TOKEN-}" ]] || missing+=("GITHUB_TOKEN (GitHub API token)")
 
     case "$AGENT" in
         claude)
@@ -144,15 +147,8 @@ buildImage() {
     docker build -t "$image" "$AGENT_DIR"
 }
 
-# Validate that the repository and issue number have the expected form.
-validateTargets() {
-    [[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] ||
-        die "GITHUB_REPOSITORY must be in owner/repo form, got '$GITHUB_REPOSITORY'"
-    [[ "$GITHUB_ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]] ||
-        die "GITHUB_ISSUE_NUMBER must be a positive integer, got '$GITHUB_ISSUE_NUMBER'"
-    [[ "$AGENT" =~ ^(claude|codex)$ ]] ||
-        die "AGENT must be 'claude' or 'codex', got '$AGENT'"
-
+# Log the target for operator clarity (format validation happens in the container).
+logTarget() {
     log "Target: $GITHUB_REPOSITORY issue #$GITHUB_ISSUE_NUMBER with agent $AGENT"
 }
 
@@ -160,16 +156,7 @@ validateTargets() {
 # §14: credential values never appear in the process table or logs.
 runContainer() {
     local image="${1:-$IMAGE_DEFAULT}"
-    local github_token status=0
-
-    # GITHUB_TOKEN is required to clone the repository. Prompt for it if not set.
-    if [[ -z "${GITHUB_TOKEN-}" ]]; then
-        printf '[SMOKE] GITHUB_TOKEN not set. Enter a GitHub token (will not echo): ' >&2
-        read -rs github_token
-        printf '\n' >&2
-        [[ -n "$github_token" ]] || die "GITHUB_TOKEN is required"
-        GITHUB_TOKEN="$github_token"
-    fi
+    local status=0
 
     log "Starting container $image"
     log "  Repository: $GITHUB_REPOSITORY"
@@ -232,7 +219,7 @@ main() {
     locateCredentialFile
     sourceCredentialFile
     validateCredentials
-    validateTargets
+    logTarget
     checkBuildPrerequisites
     buildImage "$IMAGE_DEFAULT"
 

@@ -254,11 +254,16 @@ export AGENT=codex
 make -C images/agent smoke
 ```
 
+**Note on prior login credentials:** The "prior login" options listed above (`~/.claude/.credentials.json`,
+`~/.codex/auth.json`) are validated by the harness but will not authenticate through this Phase 1 test,
+because the container does not mount your home directory into `/home/node`. Set an explicit credential
+instead (OAuth token or API key).
+
 ### Target repository and issue
 
-Provide a real public or private repository and issue number you can push to. The agent will
-clone the repository, create a branch and read the issue (that is all Phase 1 does; pushing,
-commenting and result callbacks are later phases).
+Provide a real public or private repository and issue number. The harness will clone the
+repository, create a branch and read the issue (that is all Phase 1 does; pushing, commenting
+and result callbacks are later phases).
 
 ```sh
 export GITHUB_REPOSITORY=owner/repo
@@ -266,25 +271,24 @@ export GITHUB_ISSUE_NUMBER=123
 make -C images/agent smoke
 ```
 
-or:
+or pass them as arguments:
 
 ```sh
-make -C images/agent smoke -- owner/repo 123
+make -C images/agent smoke ARGS="owner/repo 123"
 ```
 
-If not set, the `GITHUB_ISSUE_NUMBER` must be a valid public issue (or the token must have
-access to it). The agent modifies nothing in this phase, so pointing at a non-existent issue
-is safe; you will see an error about the issue not existing.
+The issue number must be a valid integer. The harness does not modify anything in Phase 1,
+so pointing at a non-existent issue is safe; you will see a GitHub API error.
 
 ### GitHub token
 
-The harness also needs a GitHub token to clone the repository and read the issue. Set
-`GITHUB_TOKEN` if you have one, or the script will prompt for it interactively.
+The harness also needs a GitHub token to clone the repository and read the issue.
+Set `GITHUB_TOKEN` in the environment or in `images/.env.local`:
 
 ```sh
 export GITHUB_TOKEN="ghp_..."
 export CLAUDE_CODE_OAUTH_TOKEN="sk-..."
-make -C images/agent smoke -- owner/repo 123
+make -C images/agent smoke ARGS="owner/repo 123"
 ```
 
 ### Successful run

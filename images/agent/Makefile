@@ -15,7 +15,7 @@ endif
 SHELL_SOURCES := bootstrap/sandcastle-run bootstrap/sandcastle-askpass \
 	$(shell find . -name '*.sh' -not -path './.bats/*')
 
-.PHONY: check lint test build
+.PHONY: check lint test build smoke
 check: lint test build
 
 lint:
@@ -26,6 +26,9 @@ test: $(BATS)
 
 build:
 	docker build -t $(IMAGE) .
+
+smoke:
+	$(CURDIR)/scripts/smoke.sh $(ARGS)
 
 # bats-core has no dependencies and installs from a git checkout, which works the same on a
 # CI runner and a developer machine without a package manager or sudo.

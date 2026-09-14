@@ -35,15 +35,29 @@ jobs:
             exit 1
           fi
 
-      - name: Clone a public repository and write the issue context
+      - name: Bootstrap pipeline works end-to-end with fake CLI
         run: |
-          # A dummy token: github.com serves a public clone anonymously, and the issue payload
-          # comes from a mounted fixture, so this runs with no credential of any kind.
+          # Test that the bootstrap reaches the CLI successfully without real credentials.
+          # Uses fixture repository and issue, and a fake CLI so we can assert successful
+          # completion. This proves: environment validation, clone, branch creation,
+          # issue fetch, and CLI invocation all work correctly.
           mkdir -p fixture/repos/octocat/Hello-World/issues
           echo '{"number":1,"title":"Fixture issue","body":"body","labels":[]}' \
             > fixture/repos/octocat/Hello-World/issues/1
+
+          # Create fake CLI that succeeds (proving bootstrap reached the invocation point)
+          mkdir -p fakebin
+          cat > fakebin/claude <<'EOF'
+          #!/bin/sh
+          printf 'fake claude read the prompt\n'
+          exit 0
+          EOF
+          chmod +x fakebin/claude
+
           docker run --rm \
             -v "$PWD/fixture:/fixture:ro" \
+            -v "$PWD/fakebin:/fakebin:ro" \
+            -e PATH=/fakebin:/usr/local/bin:/usr/bin:/bin \
             -e SANDCASTLE_RUN_ID=run-ci-$GITHUB_RUN_ID \
             -e GITHUB_REPOSITORY=octocat/Hello-World \
             -e GITHUB_ISSUE_NUMBER=1 \

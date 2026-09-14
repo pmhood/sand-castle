@@ -9,6 +9,12 @@ readonly FAKE_TOKEN='fake-token-3f8b21c7'
 # The agent CLI's own credential: the runner must hand it to the CLI and never log it (§13).
 readonly FAKE_AGENT_CREDENTIAL='fake-agent-credential-9d4e71a2'
 
+# Neutralize the GitHub Actions environment so the test suite is hermetic.
+# CI sets GITHUB_REPOSITORY, GITHUB_SERVER_URL, and GITHUB_API_URL; tests rely on these
+# being absent so they can exercise different configurations. Unset them now so all tests
+# inherit a clean slate, then each test can set them explicitly.
+unset GITHUB_REPOSITORY GITHUB_ISSUE_NUMBER GITHUB_TOKEN GITHUB_SERVER_URL GITHUB_API_URL
+
 # A local git host and GitHub API stand-in, so the suite needs no network and no credential.
 # file:// URLs exercise the same clone and curl code paths the real hosts do.
 makeFixtures() {
@@ -145,6 +151,36 @@ stopChallengingGitServer() {
     wait "$SERVER_PID" 2>/dev/null || true
 }
 
+# Installs a fake docker binary on PATH that records invocations but does not run containers.
+# This prevents smoke.sh tests from invoking the real docker with real credentials (§14 and
+# the quota leak in earlier project work). The fake records argv in DOCKER_RECORD, simulating
+# docker commands without side effects.
+installFakeDocker() {
+    local root bin
+    root=${BATS_TEST_TMPDIR:-${BATS_FILE_TMPDIR-}}
+    [[ -n $root ]] || return 0
+    bin="$root/bin"
+    DOCKER_RECORD="$root/docker-record"
+    mkdir -p "$bin" "$DOCKER_RECORD"
+
+    cat >"$bin/docker" <<'EOF'
+#!/usr/bin/env bash
+# Fake docker: record the invocation and exit cleanly without running anything.
+printf '%s\n' "$@" >"$DOCKER_RECORD/docker.argv"
+# Simulate `docker image inspect` behavior for the "image already exists" path.
+if [[ "$1" == "image" && "$2" == "inspect" ]]; then
+    exit 0
+fi
+# Simulate `docker build` or `docker run` with a success exit.
+exit 0
+EOF
+    chmod +x "$bin/docker"
+    export DOCKER_RECORD="$DOCKER_RECORD"
+    export PATH="$bin:$PATH"
+}
+
 # Runs as every test file loads this one, before its setup_file, its setup and any test body,
 # so the agent CLIs a run can reach are the stand-ins and not the real thing (§13).
+# Also install fake docker to prevent smoke.sh tests from running real containers (§14).
 installFakeAgentClis
+installFakeDocker

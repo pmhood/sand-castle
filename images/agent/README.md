@@ -252,6 +252,9 @@ Set one of:
 export CODEX_API_KEY="sk-..."
 export AGENT=codex
 make -C images/agent smoke
+
+# Unset AGENT to return to Claude for subsequent runs
+unset AGENT
 ```
 
 **Note on prior login credentials:** The "prior login" options listed above (`~/.claude/.credentials.json`,

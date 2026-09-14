@@ -123,7 +123,16 @@ validateCredentials() {
     esac
 
     if [[ ${#missing[@]} -gt 0 ]]; then
-        die "Missing required credentials for agent '$AGENT'. Set one of: ${missing[*]}"
+        local github_msg agent_msg
+        # Separate GITHUB_TOKEN requirement from agent-specific requirements
+        if [[ " ${missing[*]} " =~ " GITHUB_TOKEN " ]]; then
+            github_msg="GITHUB_TOKEN is required. "
+            missing=("${missing[@]/GITHUB_TOKEN (GitHub API token)/}")  # Remove GITHUB_TOKEN from array
+        fi
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            agent_msg="For agent '$AGENT', set one of: ${missing[*]}"
+        fi
+        die "${github_msg}${agent_msg}"
     fi
 
     log "Credentials validated for agent $AGENT"

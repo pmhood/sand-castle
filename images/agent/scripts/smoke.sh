@@ -232,8 +232,8 @@ main() {
     locateCredentialFile
     sourceCredentialFile
     validateCredentials
-    checkBuildPrerequisites
     validateTargets
+    checkBuildPrerequisites
     buildImage "$IMAGE_DEFAULT"
 
     local status=0

@@ -53,6 +53,15 @@ make -C images/agent check     # shellcheck, the bats suite, and docker build
 on `PATH`. The suite needs no network and no credentials: it runs against a local git
 repository and a local issue payload over `file://` URLs.
 
+Run it under bash 5 before trusting a green result. macOS ships bash 3.2, which ignores
+`errexit` for a bare `[[ ]]`, so a non-final `[[ ]]` assertion cannot fail a test there; CI
+(ubuntu-24.04) and this image both enforce it:
+
+```sh
+docker run --rm -v "$PWD/images/agent:/agent" -w /agent \
+  --entrypoint /agent/.bats/bin/bats sandcastle-agent:dev bootstrap/test
+```
+
 ## Verify the image by hand
 
 ```sh

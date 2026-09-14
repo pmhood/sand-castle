@@ -97,8 +97,11 @@ setup() {
 @test "a payload that is not json fails the run with the GITHUB prefix" {
     GITHUB_ISSUE_NUMBER=8 runBootstrap
     [ "$status" -eq 1 ]
-    [[ $output == *'[GITHUB] parse error'* ]]
     [[ $output == *'Could not parse the GitHub issue payload'* ]]
+    # jq's own complaint is relayed through the prefixed log. Match the prefix and the words
+    # both jq 1.6 ("parse error: ...") and jq 1.7 ("jq: parse error: ...") share.
+    [[ $output == *'[GITHUB]'*'parse error'* ]]
+    assertPrefixedLines
     [ ! -e "$SANDCASTLE_WORKSPACE/issue-context.json" ]
 }
 

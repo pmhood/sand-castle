@@ -10,14 +10,6 @@ setup() {
     exportRunEnvironment "$BATS_TEST_TMPDIR"
 }
 
-# $output holds stdout and stderr together unless a test asks for them apart.
-refuteToken() {
-    [[ $output != *"$FAKE_TOKEN"* ]] || {
-        echo "token leaked into output: $output"
-        return 1
-    }
-}
-
 @test "the token never reaches the logs of a successful run" {
     runBootstrap
     [ "$status" -eq 0 ]

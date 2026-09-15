@@ -29,7 +29,7 @@ setup() {
     AGENT=gemini
     run runAgent
     [ "$status" -eq 1 ]
-    [[ $output == *"No runner for AGENT 'gemini'"* ]]
+    assertContains "$output" "No runner for AGENT 'gemini'"
     [ ! -e "$AGENT_CLI_RECORD/claude.prompt" ]
 }
 
@@ -39,7 +39,7 @@ setup() {
     RUNNERS_DIR="$BATS_TEST_TMPDIR/absent"
     run runAgent
     [ "$status" -eq 1 ]
-    [[ $output == *'[SANDCASTLE] Could not load the claude runner'* ]]
+    assertContains "$output" '[SANDCASTLE] Could not load the claude runner'
 }
 
 @test "a runner that is not valid bash reports what bash objected to" {
@@ -52,24 +52,24 @@ setup() {
     run runAgent
     [ "$status" -eq 1 ]
     # bash's own complaint is relayed through the prefixed log, not swallowed.
-    [[ $output == *'[SANDCASTLE]'*'syntax error'* ]]
-    [[ $output == *'[SANDCASTLE] The claude runner at'*'is not valid bash'* ]]
+    assertLineContains "$output" '[SANDCASTLE]' 'syntax error'
+    assertLineContains "$output" '[SANDCASTLE] The claude runner at' 'is not valid bash'
 }
 
 @test "each CLI is invoked non-interactively, with the prompt out of its arguments" {
     runBootstrap
     [ "$status" -eq 0 ]
     run cat "$AGENT_CLI_RECORD/claude.argv"
-    [[ $output == *'--print'* ]]
-    [[ $output == *'--permission-mode'* ]]
-    [[ $output != *'Sessions must expire'* ]]
+    assertContains "$output" '--print'
+    assertContains "$output" '--permission-mode'
+    refuteContains "$output" 'Sessions must expire'
 
     resetWorkspace
     AGENT=codex runBootstrap
     [ "$status" -eq 0 ]
     run cat "$AGENT_CLI_RECORD/codex.argv"
-    [[ $output == *'exec'* ]]
-    [[ $output != *'Sessions must expire'* ]]
+    assertContains "$output" 'exec'
+    refuteContains "$output" 'Sessions must expire'
 }
 
 @test "the prompt carries the run, repository, issue and requirements of section 26" {
@@ -77,14 +77,14 @@ setup() {
     [ "$status" -eq 0 ]
 
     run cat "$AGENT_CLI_RECORD/claude.prompt"
-    [[ $output == *'Sand Castle agent sandbox'* ]]
-    [[ $output == *'run-abc123'* ]]
-    [[ $output == *'octo/demo'* ]]
-    [[ $output == *'#7 Add authentication middleware'* ]]
-    [[ $output == *'Sessions must expire after 30 minutes.'* ]]
-    [[ $output == *'bug, effort:medium'* ]]
-    [[ $output == *'- inspect the repository before changing code'* ]]
-    [[ $output == *'- run relevant tests'* ]]
+    assertContains "$output" 'Sand Castle agent sandbox'
+    assertContains "$output" 'run-abc123'
+    assertContains "$output" 'octo/demo'
+    assertContains "$output" '#7 Add authentication middleware'
+    assertContains "$output" 'Sessions must expire after 30 minutes.'
+    assertContains "$output" 'bug, effort:medium'
+    assertContains "$output" '- inspect the repository before changing code'
+    assertContains "$output" '- run relevant tests'
 }
 
 @test "both runners send the same prompt" {
@@ -108,29 +108,29 @@ setup() {
 @test "the agent's output is streamed under its own section 31 prefix" {
     runBootstrap
     [ "$status" -eq 0 ]
-    [[ $output == *'[CLAUDE] fake claude read the prompt'* ]]
-    [[ $output == *'[CLAUDE] fake claude wrote to stderr'* ]]
+    assertContains "$output" '[CLAUDE] fake claude read the prompt'
+    assertContains "$output" '[CLAUDE] fake claude wrote to stderr'
     assertPrefixedLines
 
     resetWorkspace
     AGENT=codex runBootstrap
     [ "$status" -eq 0 ]
-    [[ $output == *'[CODEX] fake codex read the prompt'* ]]
-    [[ $output == *'[CODEX] fake codex wrote to stderr'* ]]
+    assertContains "$output" '[CODEX] fake codex read the prompt'
+    assertContains "$output" '[CODEX] fake codex wrote to stderr'
     assertPrefixedLines
 }
 
 @test "the CLI's exit code is the run's exit code, unchanged" {
     AGENT_CLI_EXIT=42 runBootstrap
     [ "$status" -eq 42 ]
-    [[ $output == *'[CLAUDE] Claude Code CLI exited with status 42'* ]]
-    [[ $output == *'Run run-abc123 failed'* ]]
-    [[ $output == *'exit_code=42'* ]]
+    assertContains "$output" '[CLAUDE] Claude Code CLI exited with status 42'
+    assertContains "$output" 'Run run-abc123 failed'
+    assertContains "$output" 'exit_code=42'
 
     resetWorkspace
     AGENT=codex AGENT_CLI_EXIT=7 runBootstrap
     [ "$status" -eq 7 ]
-    [[ $output == *'[CODEX] Codex CLI exited with status 7'* ]]
+    assertContains "$output" '[CODEX] Codex CLI exited with status 7'
 }
 
 @test "the agent's credential reaches its CLI and reaches nothing else" {
@@ -147,7 +147,7 @@ setup() {
         [ "$(cat "$AGENT_CLI_RECORD/$agent.credential")" = "$FAKE_AGENT_CREDENTIAL" ]
         # ... and it must get there without passing through the log, the arguments the
         # process table exposes, or the prompt.
-        [[ $output != *"$FAKE_AGENT_CREDENTIAL"* ]]
+        refuteContains "$output" "$FAKE_AGENT_CREDENTIAL"
         run grep -r --binary-files=text "$FAKE_AGENT_CREDENTIAL" \
             "$AGENT_CLI_RECORD/$agent.argv" "$AGENT_CLI_RECORD/$agent.prompt" \
             "$SANDCASTLE_WORKSPACE"

@@ -154,6 +154,60 @@ setup() {
     fi
 }
 
+# Every variable the agent CLIs read for themselves, in smoke.sh's own order.
+AGENT_CREDENTIAL_VARS=(
+    CLAUDE_CODE_OAUTH_TOKEN
+    ANTHROPIC_API_KEY
+    ANTHROPIC_AUTH_TOKEN
+    CODEX_API_KEY
+    CODEX_ACCESS_TOKEN
+    CLAUDE_CONFIG_DIR
+    CODEX_HOME
+)
+
+# `-e VAR` on a variable the host does not have makes it set-but-empty in the container, and
+# the CLIs do not read "" back as "absent": an empty CLAUDE_CONFIG_DIR resolves against the
+# working directory, so the CLI writes its config into the checkout the agent is working in.
+@test "smoke script passes -e only for the credential variables the host has" {
+    run bash -c "
+        unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CODEX_API_KEY CODEX_ACCESS_TOKEN \
+              CLAUDE_CONFIG_DIR CODEX_HOME
+        export GITHUB_TOKEN='github-token' CLAUDE_CODE_OAUTH_TOKEN='token'
+        '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1
+    "
+    [ "$status" -eq 0 ]
+
+    # The fake docker records one argument per line, so an exact-line match is exactly the
+    # `-e VAR` pass-through form: the name reaches docker and the value does not.
+    local var
+    for var in "${AGENT_CREDENTIAL_VARS[@]}"; do
+        run grep -Fxq "$var" "$DOCKER_RECORD/docker.argv"
+        if [ "$var" = CLAUDE_CODE_OAUTH_TOKEN ]; then
+            [ "$status" -eq 0 ]   # the one the host has is passed through
+        else
+            [ "$status" -ne 0 ]   # the six it does not have are not
+        fi
+    done
+}
+
+# The same rule for a variable the host sets to nothing, which is how an unset one arrives
+# after any layer that defaults it -- an `export VAR="${VAR-}"`, or a Pod env entry with an
+# empty value (§16). An empty value carries no credential and no config path.
+@test "smoke script passes no -e for a credential variable set to the empty string" {
+    run bash -c "
+        export GITHUB_TOKEN='github-token' CLAUDE_CODE_OAUTH_TOKEN='token'
+        export CLAUDE_CONFIG_DIR='' CODEX_HOME='' CODEX_ACCESS_TOKEN=''
+        '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1
+    "
+    [ "$status" -eq 0 ]
+
+    local var
+    for var in CLAUDE_CONFIG_DIR CODEX_HOME CODEX_ACCESS_TOKEN; do
+        run grep -Fxq "$var" "$DOCKER_RECORD/docker.argv"
+        [ "$status" -ne 0 ]
+    done
+}
+
 @test "smoke script generates and uses a unique run ID in docker invocation" {
     # Verify the script generates a smoke-<timestamp>-<random> run ID and passes it to docker.
     run bash -c "

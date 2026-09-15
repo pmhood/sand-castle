@@ -25,6 +25,19 @@ readonly AGENT_DIR="$(dirname "$SCRIPT_DIR")"
 
 readonly IMAGE_DEFAULT="sandcastle-agent:dev"
 
+# Every variable the agent CLIs read for themselves (see README, "Agent credentials"): the
+# credentials and the two that say where a prior login lives. The bootstrap never reads any of
+# them; they are passed straight through to the CLI (§13, §52).
+readonly AGENT_CREDENTIAL_VARS=(
+    CLAUDE_CODE_OAUTH_TOKEN
+    ANTHROPIC_API_KEY
+    ANTHROPIC_AUTH_TOKEN
+    CODEX_API_KEY
+    CODEX_ACCESS_TOKEN
+    CLAUDE_CONFIG_DIR
+    CODEX_HOME
+)
+
 # Credentials are never logged; only credential variable names are printed.
 log() {
     printf '[SMOKE] %s\n' "$*" >&2
@@ -165,7 +178,32 @@ logTarget() {
 # §14: credential values never appear in the process table or logs.
 runContainer() {
     local image="${1:-$IMAGE_DEFAULT}"
-    local status=0
+    local status=0 var
+
+    # `-e VAR` passes a variable through by name, so its value stays out of argv and out of
+    # the process table (§14). The run's own context is always set by the time we get here.
+    local dockerArgs=(
+        run --rm
+        -e SANDCASTLE_RUN_ID
+        -e GITHUB_REPOSITORY
+        -e GITHUB_ISSUE_NUMBER
+        -e AGENT
+        -e GITHUB_TOKEN
+    )
+
+    # Add an agent credential only when the operator actually supplied one -- empty counts as
+    # absent here exactly as it does in validateCredentials, and an unset or empty variable
+    # must not arrive in the container set: the CLIs do not read "" back as "absent".
+    # An empty CLAUDE_CONFIG_DIR resolves against the working directory, which is the checkout,
+    # so the CLI writes backups/, projects/ and sessions/ into the repository the agent is
+    # working in. Whatever injects these next (§16's AgentCredentialProvider, whose Pod env
+    # entries have the same trap) inherits the rule: never materialise an unset credential
+    # variable as an empty one.
+    for var in "${AGENT_CREDENTIAL_VARS[@]}"; do
+        if [[ -n ${!var-} ]]; then
+            dockerArgs+=(-e "$var")
+        fi
+    done
 
     log "Starting container $image"
     log "  Repository: $GITHUB_REPOSITORY"
@@ -176,32 +214,13 @@ runContainer() {
 
     # Pass credentials through the environment to docker run. The credential values never
     # appear in the command line (which the process table would expose), only their variable
-    # names. The subshell exits with the container's exit code.
+    # names. A credential reached this script through the environment, so it is exported
+    # already; the run's own context is exported here. The subshell exits with the
+    # container's exit code.
     (
         export GITHUB_TOKEN SANDCASTLE_RUN_ID GITHUB_REPOSITORY GITHUB_ISSUE_NUMBER AGENT
-        # Pass through any agent-specific credentials that are set, but never log them.
-        export CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN-}"
-        export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY-}"
-        export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN-}"
-        export CODEX_API_KEY="${CODEX_API_KEY-}"
-        export CODEX_ACCESS_TOKEN="${CODEX_ACCESS_TOKEN-}"
-        export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR-}"
-        export CODEX_HOME="${CODEX_HOME-}"
 
-        docker run --rm \
-            -e SANDCASTLE_RUN_ID \
-            -e GITHUB_REPOSITORY \
-            -e GITHUB_ISSUE_NUMBER \
-            -e AGENT \
-            -e GITHUB_TOKEN \
-            -e CLAUDE_CODE_OAUTH_TOKEN \
-            -e ANTHROPIC_API_KEY \
-            -e ANTHROPIC_AUTH_TOKEN \
-            -e CODEX_API_KEY \
-            -e CODEX_ACCESS_TOKEN \
-            -e CLAUDE_CONFIG_DIR \
-            -e CODEX_HOME \
-            "$image"
+        docker "${dockerArgs[@]}" "$image"
     ) || status=$?
 
     return "$status"

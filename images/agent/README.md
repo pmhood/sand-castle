@@ -94,7 +94,18 @@ source: Claude Code's error lists `ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN,
 CLAUDE_CODE_OAUTH_TOKEN` as the accepted set, and `codex login --with-access-token` reads the
 token that `CODEX_ACCESS_TOKEN` supplies. Proving them is the smoke harness's job.
 
-Two differences matter to whoever injects these:
+Three differences matter to whoever injects these:
+
+- **An empty value is not an absent one.** Every row above is supplied only when there is
+  something to supply; a variable that is unset must not be materialised as `""`. The CLIs do
+  not read `""` back as "absent": with `CLAUDE_CONFIG_DIR=""`, the Claude CLI resolves its
+  config directory relative to the working directory and writes `backups/`, `projects/` and
+  `sessions/` into the checkout the agent is working in, which a later phase would commit and
+  push. (Codex `0.154.0` happens to fall back to `~/.codex` for an empty `CODEX_HOME`, but no
+  CLI is owed that benefit of the doubt.) `scripts/smoke.sh` therefore builds its `docker run`
+  arguments conditionally, adding `-e VAR` only for a variable that is set and non-empty;
+  §16's `AgentCredentialProvider` has the same trap waiting in a Pod `env:` entry with an
+  empty `value:`, and the same rule.
 
 - The CLIs do not agree. Claude Code takes an OAuth token straight from the environment;
   Codex `0.154.0` does **not** read `OPENAI_API_KEY` (a run with only that variable set sent

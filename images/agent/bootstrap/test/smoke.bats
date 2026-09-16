@@ -20,26 +20,24 @@ setup() {
 @test "smoke script requires GITHUB_REPOSITORY" {
     run bash -c "unset GITHUB_REPOSITORY GITHUB_ISSUE_NUMBER AGENT; '$SMOKE_SCRIPT'" 2>&1
     [ "$status" -ne 0 ]
-    [[ $output == *"GITHUB_REPOSITORY not set"* ]]
+    assertContains "$output" "GITHUB_REPOSITORY not set"
 }
 
 @test "smoke script requires GITHUB_ISSUE_NUMBER" {
     run bash -c "export GITHUB_REPOSITORY='owner/repo'; unset GITHUB_ISSUE_NUMBER AGENT; '$SMOKE_SCRIPT'" 2>&1
     [ "$status" -ne 0 ]
-    [[ $output == *"GITHUB_ISSUE_NUMBER not set"* ]]
+    assertContains "$output" "GITHUB_ISSUE_NUMBER not set"
 }
 
 @test "smoke script accepts arguments for repository and issue" {
-    # This test can't run docker, so it will fail on docker check, but it should parse
-    # the arguments without error up to that point.
+    # All three positional arguments reach the run, and the target line is where they become
+    # visible. (This body used to end in `:`, so it asserted nothing at all.)
     run bash -c "
-        set +e
-        '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1 | head -20
-        exit \$?
+        export CLAUDE_CODE_OAUTH_TOKEN='token' GITHUB_TOKEN='github-token'
+        '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1
     "
-    # Should succeed in validation (though fail on docker check).
-    # The key is that it parsed the arguments correctly.
-    :
+    [ "$status" -eq 0 ]
+    assertContains "$output" 'Target: owner/repo issue #123 with agent claude'
 }
 
 @test "smoke script passes invalid GITHUB_REPOSITORY to the container for validation" {
@@ -47,7 +45,7 @@ setup() {
     # The harness just passes arguments through.
     run bash -c "export CLAUDE_CODE_OAUTH_TOKEN='token' GITHUB_TOKEN='token'; '$SMOKE_SCRIPT' invalid-no-slash 123 claude 2>&1" || true
     # Script succeeds at the harness level; container will validate format on next phase.
-    [[ $output =~ Target:\ invalid-no-slash ]]
+    assertContains "$output" 'Target: invalid-no-slash'
 }
 
 @test "smoke script passes invalid GITHUB_ISSUE_NUMBER to the container for validation" {
@@ -55,22 +53,24 @@ setup() {
     # The harness just passes arguments through.
     run bash -c "export CLAUDE_CODE_OAUTH_TOKEN='token' GITHUB_TOKEN='token'; '$SMOKE_SCRIPT' owner/repo 0 claude 2>&1" || true
     # Script succeeds at the harness level; container will validate format on next phase.
-    [[ $output =~ Target:\ owner/repo ]]
+    assertContains "$output" 'Target: owner/repo'
 }
 
 @test "smoke script requires agent credentials (claude) and never invokes docker without them" {
     run bash -c "
         unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CONFIG_DIR GITHUB_TOKEN
+        export HOME=\$(mktemp -d)
         '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1
     "
     # Property: validation fails with non-zero exit and docker is not invoked.
     [ "$status" -ne 0 ]
-    # Match stable fragment: the error message names at least one required credential
-    # (exact wording may change, but "GITHUB_TOKEN" will always be required).
-    [[ $output == *"GITHUB_TOKEN"* ]]
+    # The message names what is missing. HOME is a fresh directory above, so the agent
+    # credential is genuinely absent rather than satisfied by the developer's own prior login
+    # in ~/.claude, which is what made this test pass for the wrong reason on a Mac.
+    assertContains "$output" 'GITHUB_TOKEN' 'CLAUDE_CODE_OAUTH_TOKEN'
     # CRITICAL: Verify docker was NOT invoked (no argv record created).
     # This assertion enforces that validation runs BEFORE docker is touched.
-    [[ ! -f "$DOCKER_RECORD/docker.argv" ]]
+    [ ! -f "$DOCKER_RECORD/docker.argv" ]
 }
 
 @test "smoke script requires agent credentials (codex) and never invokes docker without them" {
@@ -81,40 +81,48 @@ setup() {
     "
     # Property: validation fails with non-zero exit and docker is not invoked.
     [ "$status" -ne 0 ]
-    # Match stable fragment: the error message names at least one required credential
-    # (exact wording may change, but "GITHUB_TOKEN" will always be required).
-    [[ $output == *"GITHUB_TOKEN"* ]]
+    # The message names what is missing; HOME is a fresh directory above, so no prior
+    # ~/.codex/auth.json can satisfy the agent credential in its place.
+    assertContains "$output" 'GITHUB_TOKEN' 'CODEX_API_KEY'
     # CRITICAL: Verify docker was NOT invoked (no argv record created).
     # This assertion enforces that validation runs BEFORE docker is touched.
-    [[ ! -f "$DOCKER_RECORD/docker.argv" ]]
+    [ ! -f "$DOCKER_RECORD/docker.argv" ]
 }
 
+# Each of the three below used to end in `[ "$status" -eq 1 ] || [ "$status" -eq 0 ]`, which a
+# piped `grep -q` can only ever satisfy: the test could not fail in any shell, and in fact the
+# grep found nothing, because no GITHUB_TOKEN was set and validation died before saying a word
+# about the agent credential. HOME is a fresh directory in each, so the variable under test is
+# the only thing that can satisfy validation.
 @test "smoke script accepts CLAUDE_CODE_OAUTH_TOKEN" {
     run bash -c "
-        export CLAUDE_CODE_OAUTH_TOKEN='test-token'
-        '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1 | grep -q 'Credentials validated'
+        export HOME=\$(mktemp -d)
+        export CLAUDE_CODE_OAUTH_TOKEN='test-token' GITHUB_TOKEN='github-token'
+        '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1
     "
-    # Will fail on docker check, but should validate credentials first
-    [ "$status" -eq 1 ] || [ "$status" -eq 0 ]
+    [ "$status" -eq 0 ]
+    assertContains "$output" 'Credentials validated'
 }
 
 @test "smoke script accepts ANTHROPIC_API_KEY" {
     run bash -c "
+        export HOME=\$(mktemp -d)
         unset CLAUDE_CODE_OAUTH_TOKEN
-        export ANTHROPIC_API_KEY='test-key'
-        '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1 | grep -q 'Credentials validated'
+        export ANTHROPIC_API_KEY='test-key' GITHUB_TOKEN='github-token'
+        '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1
     "
-    # Will fail on docker check, but should validate credentials first
-    [ "$status" -eq 1 ] || [ "$status" -eq 0 ]
+    [ "$status" -eq 0 ]
+    assertContains "$output" 'Credentials validated'
 }
 
 @test "smoke script accepts CODEX_API_KEY" {
     run bash -c "
-        export CODEX_API_KEY='test-key'
-        '$SMOKE_SCRIPT' owner/repo 123 codex 2>&1 | grep -q 'Credentials validated'
+        export HOME=\$(mktemp -d)
+        export CODEX_API_KEY='test-key' GITHUB_TOKEN='github-token'
+        '$SMOKE_SCRIPT' owner/repo 123 codex 2>&1
     "
-    # Will fail on docker check, but should validate credentials first
-    [ "$status" -eq 1 ] || [ "$status" -eq 0 ]
+    [ "$status" -eq 0 ]
+    assertContains "$output" 'Credentials validated'
 }
 
 @test "smoke script does not leak ANY credential variable into output or docker argv" {
@@ -133,25 +141,26 @@ setup() {
     " || true
 
     # No credential must appear in output. Test each one distinctly.
-    [[ $output != *"canary-github-1a2b3c"* ]]
-    [[ $output != *"canary-claude-2b3c4d"* ]]
-    [[ $output != *"canary-api-key-3c4d5e"* ]]
-    [[ $output != *"canary-auth-token-4d5e6f"* ]]
-    [[ $output != *"canary-codex-api-5e6f7g"* ]]
-    [[ $output != *"canary-codex-access-6f7g8h"* ]]
-    [[ $output != *"canary-claude-config-7g8h9i"* ]]
+    refuteContains "$output" "canary-github-1a2b3c"
+    refuteContains "$output" "canary-claude-2b3c4d"
+    refuteContains "$output" "canary-api-key-3c4d5e"
+    refuteContains "$output" "canary-auth-token-4d5e6f"
+    refuteContains "$output" "canary-codex-api-5e6f7g"
+    refuteContains "$output" "canary-codex-access-6f7g8h"
+    refuteContains "$output" "canary-claude-config-7g8h9i"
 
-    # No credential must appear in docker's argv. Test each one distinctly.
-    if [[ -f "$DOCKER_RECORD/docker.argv" ]]; then
-        run cat "$DOCKER_RECORD/docker.argv"
-        [[ $output != *"canary-github-1a2b3c"* ]]
-        [[ $output != *"canary-claude-2b3c4d"* ]]
-        [[ $output != *"canary-api-key-3c4d5e"* ]]
-        [[ $output != *"canary-auth-token-4d5e6f"* ]]
-        [[ $output != *"canary-codex-api-5e6f7g"* ]]
-        [[ $output != *"canary-codex-access-6f7g8h"* ]]
-        [[ $output != *"canary-claude-config-7g8h9i"* ]]
-    fi
+    # No credential must appear in docker's argv. Test each one distinctly. The record has to
+    # exist: guarded by `if`, these assertions would pass by not running at all on the day
+    # docker stopped being reached, which is the regression they exist to catch.
+    [ -f "$DOCKER_RECORD/docker.argv" ]
+    run cat "$DOCKER_RECORD/docker.argv"
+    refuteContains "$output" "canary-github-1a2b3c"
+    refuteContains "$output" "canary-claude-2b3c4d"
+    refuteContains "$output" "canary-api-key-3c4d5e"
+    refuteContains "$output" "canary-auth-token-4d5e6f"
+    refuteContains "$output" "canary-codex-api-5e6f7g"
+    refuteContains "$output" "canary-codex-access-6f7g8h"
+    refuteContains "$output" "canary-claude-config-7g8h9i"
 }
 
 # Every variable the agent CLIs read for themselves, in smoke.sh's own order.
@@ -214,16 +223,17 @@ AGENT_CREDENTIAL_VARS=(
         export CLAUDE_CODE_OAUTH_TOKEN='token'
         export GITHUB_TOKEN='github-token'
         '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1
-    " || true
+    "
+    [ "$status" -eq 0 ]
 
     # The run ID appears in the script's output.
-    [[ $output =~ smoke-[0-9]+-[0-9a-f]+ ]]
+    assertMatches "$output" 'smoke-[0-9]+-[0-9a-f]+'
 
-    # When docker is invoked, the -e SANDCASTLE_RUN_ID arguments must appear in docker's argv.
-    if [[ -f "$DOCKER_RECORD/docker.argv" ]]; then
-        run grep SANDCASTLE_RUN_ID "$DOCKER_RECORD/docker.argv"
-        [ "$status" -eq 0 ]
-    fi
+    # And docker is invoked with it, by name: `-e SANDCASTLE_RUN_ID` is one argument per line
+    # in the record, so an exact-line match is the pass-through form.
+    [ -f "$DOCKER_RECORD/docker.argv" ]
+    run grep -Fxq SANDCASTLE_RUN_ID "$DOCKER_RECORD/docker.argv"
+    [ "$status" -eq 0 ]
 }
 
 @test "smoke script is valid bash syntax" {

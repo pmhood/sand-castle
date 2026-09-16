@@ -127,9 +127,12 @@ make -C images/agent check     # shellcheck, the bats suite, and docker build
 on `PATH`. The suite needs no network and no credentials: it runs against a local git
 repository and a local issue payload over `file://` URLs.
 
-Run it under bash 5 before trusting a green result. macOS ships bash 3.2, which ignores
-`errexit` for a bare `[[ ]]`, so a non-final `[[ ]]` assertion cannot fail a test there; CI
-(ubuntu-24.04) and this image both enforce it:
+A green `make test` means the same thing on a developer Mac as it does in CI. macOS ships bash
+3.2, which ignores `errexit` for a bare `[[ ]]`, so a `[[ ]]` assertion that is not the last
+command of its test body cannot fail a test there. The suite therefore asserts only through
+simple commands — `[ ... ]` and the helpers in `bootstrap/test/helpers.bash`, which return 1
+explicitly — and `style.bats` fails if a bare `[[ ]]` assertion reappears. The image is still
+the quickest way to run the same suite under bash 5:
 
 ```sh
 docker run --rm -v "$PWD/images/agent:/agent" -w /agent \

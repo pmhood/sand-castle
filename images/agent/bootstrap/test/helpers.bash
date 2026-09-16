@@ -15,6 +15,13 @@ readonly FAKE_AGENT_CREDENTIAL='fake-agent-credential-9d4e71a2'
 # inherit a clean slate, then each test can set them explicitly.
 unset GITHUB_REPOSITORY GITHUB_ISSUE_NUMBER GITHUB_TOKEN GITHUB_SERVER_URL GITHUB_API_URL
 
+# The developer's own agent credentials are neutralized for the same reason, and one more: a
+# test that asserts the harness accepts ANTHROPIC_API_KEY passes without proving anything if the
+# variable was already in the environment, and a real credential inherited from the developer's
+# shell would be handed to the stand-in CLIs below and recorded in a temporary file (§14).
+unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN \
+    CODEX_API_KEY CODEX_ACCESS_TOKEN CLAUDE_CONFIG_DIR CODEX_HOME
+
 # A local git host and GitHub API stand-in, so the suite needs no network and no credential.
 # file:// URLs exercise the same clone and curl code paths the real hosts do.
 makeFixtures() {
@@ -109,6 +116,71 @@ EOF
 
     export AGENT_CLI_EXIT=0
     export PATH="$bin:$PATH"
+}
+
+# Assertions. bash 3.2 -- what macOS ships, and therefore what `make test` runs on a developer
+# machine -- does not apply errexit to a bare `[[ ]]`, so a `[[ ]]` assertion that is not the
+# last command of its test body is a silent no-op there while bash 5 fails the test on it. Every
+# assertion in this suite therefore either is a simple command (`[ ... ]`, which both shells
+# honour) or goes through one of the helpers below, which return 1 explicitly. style.bats keeps
+# it that way.
+#
+# The text to search is passed in rather than taken from $output, because a test asserts about
+# $output, about $stderr when it asked for them apart, and about files the run wrote.
+assertContains() {
+    local text=$1 needle
+    shift
+    for needle in "$@"; do
+        [[ $text == *"$needle"* ]] || {
+            printf 'expected to find: %s\nin:\n%s\n' "$needle" "$text"
+            return 1
+        }
+    done
+}
+
+refuteContains() {
+    local text=$1 needle
+    shift
+    for needle in "$@"; do
+        [[ $text != *"$needle"* ]] || {
+            printf 'expected not to find: %s\nin:\n%s\n' "$needle" "$text"
+            return 1
+        }
+    done
+}
+
+# Every fragment on one line. A §31 prefix and the message it is meant to prefix have to be
+# asserted together this way: a prefix matched anywhere in $output is matched by any earlier
+# line that happens to carry it, which is how a run.bats assertion on a failure path came to be
+# true whether or not the failure ever happened.
+assertLineContains() {
+    local text=$1 line fragment missing
+    shift
+    while IFS= read -r line; do
+        missing=
+        for fragment in "$@"; do
+            [[ $line == *"$fragment"* ]] || missing=yes
+        done
+        if [[ -z $missing ]]; then
+            return 0
+        fi
+    done <<<"$text"
+    printf 'no single line carries all of: %s\nin:\n%s\n' "$*" "$text"
+    return 1
+}
+
+assertMatches() {
+    local text=$1 regex=$2
+    [[ $text =~ $regex ]] || {
+        printf 'expected to match: %s\nin:\n%s\n' "$regex" "$text"
+        return 1
+    }
+}
+
+# The token the run is given must never come back out; $output holds stdout and stderr together
+# unless a test asks for them apart.
+refuteToken() {
+    refuteContains "$output" "$FAKE_TOKEN"
 }
 
 # §31 holds for every line of $output, including what the bootstrap relays from git, jq and

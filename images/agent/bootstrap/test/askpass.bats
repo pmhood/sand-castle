@@ -39,7 +39,7 @@ teardown() {
     run --separate-stderr env SHELLOPTS=xtrace "$ASKPASS" "Password for 'https://github.com': "
     [ "$status" -eq 0 ]
     [ "$output" = "$FAKE_TOKEN" ]
-    [[ $stderr != *"$FAKE_TOKEN"* ]]
+    refuteContains "$stderr" "$FAKE_TOKEN"
 }
 
 @test "git answers a credential challenge with the helper" {
@@ -47,12 +47,12 @@ teardown() {
 
     runBootstrap
     [ "$status" -eq 1 ]
-    [[ $output == *'Clone of octo/demo failed'* ]]
+    assertContains "$output" 'Clone of octo/demo failed'
 
     # The server saw Basic x-access-token:<token>, so the helper is what answered.
     local expected
     expected=$(printf '%s' "x-access-token:$FAKE_TOKEN" | base64)
-    [[ $(cat "$AUTH_LOG") == *"Basic $expected"* ]]
+    assertContains "$(cat "$AUTH_LOG")" "Basic $expected"
 }
 
 @test "a challenged clone leaks no token and stays prefixed" {
@@ -60,7 +60,7 @@ teardown() {
 
     runBootstrap
     [ "$status" -eq 1 ]
-    [[ $output != *"$FAKE_TOKEN"* ]]
+    refuteToken
     assertPrefixedLines
 }
 
@@ -69,6 +69,6 @@ teardown() {
 
     run env GIT_TRACE_CURL=1 GIT_TRACE_REDACT=0 "$SANDCASTLE_RUN"
     [ "$status" -eq 1 ]
-    [[ $output != *"$FAKE_TOKEN"* ]]
+    refuteToken
     assertPrefixedLines
 }

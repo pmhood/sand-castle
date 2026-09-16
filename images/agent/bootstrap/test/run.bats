@@ -32,12 +32,12 @@ setup() {
 
     run reportResult 0
     [ "$status" -eq 0 ]
-    [[ $output == *'Run run-abc123 completed'* ]]
+    assertContains "$output" 'Run run-abc123 completed'
 
     run reportResult 42
     [ "$status" -eq 42 ]
-    [[ $output == *'Run run-abc123 failed'* ]]
-    [[ $output == *'exit_code=42'* ]]
+    assertContains "$output" 'Run run-abc123 failed'
+    assertContains "$output" 'exit_code=42'
 }
 
 @test "a full run clones the repository onto the run branch and exits 0" {
@@ -83,24 +83,29 @@ setup() {
 @test "a missing issue fails the run with the GITHUB prefix" {
     GITHUB_ISSUE_NUMBER=404 runBootstrap
     [ "$status" -eq 1 ]
-    [[ $output == *'[GITHUB]'* ]]
-    [[ $output == *'Could not fetch issue #404'* ]]
+    # curl's own complaint, under the prefix, on the same line: the bootstrap logs "[GITHUB]
+    # Fetching issue ..." before it ever calls curl, so a prefix matched anywhere in $output is
+    # matched whether the fetch failed or not.
+    assertLineContains "$output" '[GITHUB]' 'curl:'
+    assertContains "$output" 'Could not fetch issue #404'
 }
 
 @test "a clone failure fails the run with the GIT prefix" {
     GITHUB_SERVER_URL="file://$BATS_TEST_TMPDIR/absent" runBootstrap
     [ "$status" -eq 1 ]
-    [[ $output == *'[GIT]'* ]]
-    [[ $output == *'Clone of octo/demo failed'* ]]
+    # git's own complaint, under the prefix, on the same line: "[GIT] Cloning ..." is logged
+    # unconditionally before the clone, so matching the prefix alone asserts nothing.
+    assertLineContains "$output" '[GIT]' 'fatal:'
+    assertContains "$output" 'Clone of octo/demo failed'
 }
 
 @test "a payload that is not json fails the run with the GITHUB prefix" {
     GITHUB_ISSUE_NUMBER=8 runBootstrap
     [ "$status" -eq 1 ]
-    [[ $output == *'Could not parse the GitHub issue payload'* ]]
+    assertContains "$output" 'Could not parse the GitHub issue payload'
     # jq's own complaint is relayed through the prefixed log. Match the prefix and the words
     # both jq 1.6 ("parse error: ...") and jq 1.7 ("jq: parse error: ...") share.
-    [[ $output == *'[GITHUB]'*'parse error'* ]]
+    assertLineContains "$output" '[GITHUB]' 'parse error'
     assertPrefixedLines
     [ ! -e "$SANDCASTLE_WORKSPACE/issue-context.json" ]
 }

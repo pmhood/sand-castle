@@ -144,9 +144,13 @@ docker run --rm -v "$PWD/images/agent:/agent" -w /agent \
 CI (`.github/workflows/agent-image.yml`, job `publish`) builds and pushes a multi-arch image
 to GHCR on every merge to `main` (docs/ARCHITECTURE.md §36) -- `linux/amd64` for the k3s
 cluster's nodes, `linux/arm64` so local runs and this bats suite keep working unchanged on
-Apple Silicon. `make -C images/agent publish` builds and pushes the same two platforms by
-hand; it is an escape hatch for exceptional cases, not the normal path, because a
-hand-published image can drift from the commit that supposedly produced it.
+Apple Silicon. Each push is tagged both `latest` and `sha-<short-sha>` (the merge commit's
+7-character short SHA); see [Getting the current digest](#getting-the-current-digest) for why
+both exist. `make -C images/agent publish` builds and pushes the same two platforms and tags
+by hand; it is an escape hatch for exceptional cases, not the normal path, because a
+hand-published image can drift from the commit that supposedly produced it. It needs
+`docker login ghcr.io` first, with a token that has `write:packages` (the pull instructions
+below only need the narrower `read:packages`).
 
 The package (`ghcr.io/pmhood/sandcastle-agent`) is meant to be public, so pulling it needs no
 `imagePullSecret` and no `docker login` -- no such secret then exists to get wrong (§36):
@@ -173,20 +177,27 @@ Until that step is done the package stays private and the commands above need a
 
 ### Getting the current digest
 
-Kubernetes Job manifests should reference the image by digest, not by the `latest` tag (§20).
-There is no separate file in this repo recording it -- `latest` always points at the image the
-most recent merge to `main` published, and `docker buildx imagetools inspect` (or the
-equivalent `crane digest`) reads the digest straight from the registry, which cannot drift
-from what is actually published the way a repo file copy could:
+Kubernetes Job manifests should reference the image by digest, not by a tag (§20). Prefer the
+`sha-<short-sha>` tag over `latest` when reading that digest: `latest` moves to whatever the
+newest merge to `main` published, and once it moves, the digest it used to point at becomes
+untagged -- which GHCR's untagged-image retention can reap. `sha-<short-sha>` keeps every
+published digest permanently referenceable and traceable back to the commit that produced it,
+which is what §20's "immutable image digests" actually depends on.
+
+There is no separate file in this repo recording the digest -- `docker buildx imagetools
+inspect` (or the equivalent `crane digest`), run against either tag, reads it straight from
+the registry, which cannot drift from what is actually published the way a repo file copy
+could:
 
 ```sh
-docker buildx imagetools inspect ghcr.io/pmhood/sandcastle-agent:latest
+docker buildx imagetools inspect ghcr.io/pmhood/sandcastle-agent:sha-<short-sha>
 # or, for just the digest:
-crane digest ghcr.io/pmhood/sandcastle-agent:latest
+crane digest ghcr.io/pmhood/sandcastle-agent:sha-<short-sha>
 ```
 
-The `publish` job also writes the `imagetools inspect` output to its job summary, so the
-digest a given merge produced is visible from that CI run without a local `docker` pull.
+The `publish` job also writes the `imagetools inspect` output to its job summary, alongside
+the `sha-<short-sha>` tag it just pushed, so a given merge's digest and its permanent
+reference are both visible from that CI run without a local `docker` pull.
 
 ## Verify the image by hand
 

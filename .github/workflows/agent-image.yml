@@ -102,6 +102,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Compute the short-SHA tag
+        # A permanent, per-commit tag alongside the moving `latest` one: once `latest` retags
+        # to a newer digest, the digest it used to point at becomes untagged, and GHCR's
+        # untagged-image retention can reap it. sha-<short-sha> keeps every published digest
+        # referenceable and traceable back to its commit, which §20's "immutable image
+        # digests" posture depends on.
+        run: echo "SHA_TAG=sha-${GITHUB_SHA:0:7}" >>"$GITHUB_ENV"
+
       - name: Set up QEMU (linux/arm64 leg of the cross-build)
         uses: docker/setup-qemu-action@v3
         with:
@@ -121,13 +129,14 @@ jobs:
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             -t ghcr.io/pmhood/sandcastle-agent:latest \
+            -t "ghcr.io/pmhood/sandcastle-agent:$SHA_TAG" \
             --push \
             images/agent
 
       - name: Record the published digest
         run: |
           {
-            echo '### Published: ghcr.io/pmhood/sandcastle-agent:latest'
+            echo "### Published: ghcr.io/pmhood/sandcastle-agent:latest / :$SHA_TAG"
             echo
             echo '```'
             docker buildx imagetools inspect ghcr.io/pmhood/sandcastle-agent:latest

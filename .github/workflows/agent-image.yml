@@ -4,6 +4,11 @@ on:
   pull_request:
     paths:
       - "images/agent/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "images/agent/**"
 
 jobs:
   build:
@@ -81,3 +86,59 @@ jobs:
 
       - name: Run the bootstrap test suite
         run: make -C images/agent test
+
+  # Multi-arch build and push to GHCR, on merge to main only (docs/ARCHITECTURE.md §11, §20,
+  # §36: the cluster's amd64 nodes need an image built for their architecture, not just the
+  # developer's). This is the normal path; `make -C images/agent publish` is a human escape
+  # hatch for exceptional cases, not a substitute for it -- a hand-published image can drift
+  # from the commit that supposedly produced it.
+  publish:
+    needs: [build, test, shellcheck]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute the short-SHA tag
+        # A permanent, per-commit tag alongside the moving `latest` one: once `latest` retags
+        # to a newer digest, the digest it used to point at becomes untagged, and GHCR's
+        # untagged-image retention can reap it. sha-<short-sha> keeps every published digest
+        # referenceable and traceable back to its commit, which §20's "immutable image
+        # digests" posture depends on.
+        run: echo "SHA_TAG=sha-${GITHUB_SHA:0:7}" >>"$GITHUB_ENV"
+
+      - name: Set up QEMU (linux/arm64 leg of the cross-build)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # GITHUB_TOKEN is scoped to this run and never appears in argv: --password-stdin
+        # keeps it out of the process table, same rule as everywhere else this repo talks to
+        # a registry or a credential-bearing endpoint.
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push linux/amd64 + linux/arm64
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -t ghcr.io/pmhood/sandcastle-agent:latest \
+            -t "ghcr.io/pmhood/sandcastle-agent:$SHA_TAG" \
+            --push \
+            images/agent
+
+      - name: Record the published digest
+        run: |
+          {
+            echo "### Published: ghcr.io/pmhood/sandcastle-agent:latest / :$SHA_TAG"
+            echo
+            echo '```'
+            docker buildx imagetools inspect ghcr.io/pmhood/sandcastle-agent:latest
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"

@@ -139,6 +139,55 @@ docker run --rm -v "$PWD/images/agent:/agent" -w /agent \
   --entrypoint /agent/.bats/bin/bats sandcastle-agent:dev bootstrap/test
 ```
 
+## Published image
+
+CI (`.github/workflows/agent-image.yml`, job `publish`) builds and pushes a multi-arch image
+to GHCR on every merge to `main` (docs/ARCHITECTURE.md §36) -- `linux/amd64` for the k3s
+cluster's nodes, `linux/arm64` so local runs and this bats suite keep working unchanged on
+Apple Silicon. `make -C images/agent publish` builds and pushes the same two platforms by
+hand; it is an escape hatch for exceptional cases, not the normal path, because a
+hand-published image can drift from the commit that supposedly produced it.
+
+The package (`ghcr.io/pmhood/sandcastle-agent`) is meant to be public, so pulling it needs no
+`imagePullSecret` and no `docker login` -- no such secret then exists to get wrong (§36):
+
+```sh
+docker pull ghcr.io/pmhood/sandcastle-agent:latest
+docker run --rm --entrypoint bash ghcr.io/pmhood/sandcastle-agent:latest -c \
+  'id -u; git --version; jq --version; node --version; python3 --version; claude --version; codex --version; command -v sandcastle-run'
+```
+
+**One-time maintainer setup.** A GHCR package does not exist until its first push, and
+GitHub's REST API has no endpoint to change a package's visibility (confirmed while doing
+this for #18 -- `PATCH /user/packages/container/sandcastle-agent` 404s; only the web UI can do
+it). After the `publish` workflow's first run creates the package, a repo owner must make it
+public by hand, once:
+
+1. Open <https://github.com/users/pmhood/packages/container/package/sandcastle-agent>.
+2. Click **Package settings**.
+3. Under **Danger Zone**, click **Change visibility** -> **Public**, type the package name to
+   confirm, then **I understand the consequences, change package visibility**.
+
+Until that step is done the package stays private and the commands above need a
+`docker login ghcr.io` first, with a token that has at least `read:packages`.
+
+### Getting the current digest
+
+Kubernetes Job manifests should reference the image by digest, not by the `latest` tag (§20).
+There is no separate file in this repo recording it -- `latest` always points at the image the
+most recent merge to `main` published, and `docker buildx imagetools inspect` (or the
+equivalent `crane digest`) reads the digest straight from the registry, which cannot drift
+from what is actually published the way a repo file copy could:
+
+```sh
+docker buildx imagetools inspect ghcr.io/pmhood/sandcastle-agent:latest
+# or, for just the digest:
+crane digest ghcr.io/pmhood/sandcastle-agent:latest
+```
+
+The `publish` job also writes the `imagetools inspect` output to its job summary, so the
+digest a given merge produced is visible from that CI run without a local `docker` pull.
+
 ## Verify the image by hand
 
 ```sh
@@ -193,7 +242,11 @@ credential in the environment ([agent credentials](#agent-credentials)).
   `docker run --read-only` deployment should mount `/home/node` (and `/tmp`) as writable
   `tmpfs`/volumes; `/workspace` is already expected to be a writable, per-run volume (§24).
 - No credential, token, or `.env` file is baked into any layer; none was used to build or test
-  this image.
+  this image. The build context excludes `.env`/`*.env` (`.dockerignore`), and the same
+  Dockerfile produces the published image (`ghcr.io/pmhood/sandcastle-agent`), meant to be
+  public (see [Published image](#published-image)); this was re-confirmed by scanning that
+  image's layers directly (`docker save` + `tar`/`grep`), because the blast radius of being
+  wrong is a different question once the artifact is public (#18).
 - `GITHUB_TOKEN` never reaches a log line, a URL, the process table, or the disk (§14):
   - git receives it through `GIT_ASKPASS`, so it is absent from the remote URL, from
     `.git/config` and from git's own error output when a clone fails;

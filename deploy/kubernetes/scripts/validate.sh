@@ -32,6 +32,8 @@ readonly MANIFEST_DIR="$(dirname "$SCRIPT_DIR")"
 readonly SAMPLE_RUN_ID="validate-0000"
 readonly SAMPLE_REPOSITORY="octocat/Hello-World"
 readonly SAMPLE_ISSUE_NUMBER="1"
+# A run ID that is a valid DNS-1123 label and also reads as a YAML integer; see checkScalarTypes.
+readonly SAMPLE_NUMERIC_RUN_ID="0755"
 
 # kubeconform downloads the schema for each kind it sees. One cache directory, reused across
 # runs, keeps that to one download per kind per machine -- which matters to prove-checks.sh,
@@ -109,16 +111,46 @@ schemaOf() {
     checkMatches "kubeconform actually read $(basename "$file")" 'Valid: [1-9]' "$summary"
 }
 
+# Both YAML extensions, because a `.yml` under a `*.yaml` glob is a manifest that silently gets
+# no schema check at all -- the same shape of hole as the extensionless temporary file above.
+manifestFiles() {
+    find "$MANIFEST_DIR" -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) | sort
+}
+
+# Schema validation reaches every manifest by globbing, but the property assertions below name
+# their files one by one, so a manifest added without touching this script would be schema-clean
+# and otherwise unexamined. Naming the whole set here forces that decision to be made.
+checkManifestSet() {
+    local file names=
+
+    while IFS= read -r file; do
+        names="$names $(basename "$file")"
+    done < <(manifestFiles)
+
+    check "every manifest in this directory is one this script knows about" \
+        "job.yaml namespace.yaml serviceaccount.yaml" "${names# }"
+}
+
+# Every property assertion reads document 0. A second document appended to a manifest would be
+# schema-checked and then completely unexamined -- a privileged Pod smuggled in behind a Job.
+checkSingleDocument() {
+    local file=$1
+
+    check "$(basename "$file") holds exactly one document" "1" "$(yq ea '[.] | length' "$file")"
+}
+
 schemaCheck() {
     local job=$1 file
 
     log "Schema-validating with kubeconform $(kubeconform -v)"
     mkdir -p "$SCHEMA_CACHE"
-    for file in "$MANIFEST_DIR"/*.yaml; do
+    while IFS= read -r file; do
         [ "$(basename "$file")" != "job.yaml" ] || continue # unrendered; $job is its rendering
         schemaOf "$file"
-    done
+        checkSingleDocument "$file"
+    done < <(manifestFiles)
     schemaOf "$job"
+    checkSingleDocument "$job"
 }
 
 checkNamespace() {
@@ -150,8 +182,36 @@ checkJobShape() {
         "Never" "$(read_ "$job" '.spec.template.spec.restartPolicy')"
     check "the run times out after 30 minutes (§23)" \
         "1800" "$(read_ "$job" '.spec.activeDeadlineSeconds')"
-    check "a finished Job is cleaned up on a TTL (§47)" \
-        "true" "$(read_ "$job" '(.spec.ttlSecondsAfterFinished // 0) > 0')"
+    # The exact number, not merely "a TTL is set": §47's pair and the reasoning for taking the
+    # longer of the two are written down in job.yaml and README.md, so changing it should be a
+    # deliberate edit to all three rather than a silent drift to a value nobody argued for.
+    check "a finished Job is kept for 24 hours and then cleaned up (§47)" \
+        "86400" "$(read_ "$job" '.spec.ttlSecondsAfterFinished')"
+    # One Pod per run. `parallelism: 2` would run the same non-idempotent agent twice at once,
+    # which backoffLimit says nothing about.
+    check "the Job runs one Pod at a time (§19)" \
+        "1" "$(read_ "$job" '.spec.parallelism // 1')"
+    check "the Job wants exactly one completion (§19)" \
+        "1" "$(read_ "$job" '.spec.completions // 1')"
+}
+
+# Every assertion about the agent container reads containers[0], and the credential assertions
+# read that container's env. Both are only exhaustive if that container is the only one in the
+# Pod: a sidecar, an initContainer or an envFrom is a second, unexamined way in for a literal
+# credential or a privileged process.
+checkPodShape() {
+    local job=$1 pod=".spec.template.spec"
+
+    check "the Pod holds exactly one container (§20)" \
+        "1" "$(read_ "$job" "$pod.containers | length")"
+    check "the Pod has no init containers (§50)" \
+        "0" "$(read_ "$job" "($pod.initContainers // []) | length")"
+    check "the Pod has no ephemeral containers (§50)" \
+        "0" "$(read_ "$job" "($pod.ephemeralContainers // []) | length")"
+    # envFrom takes a whole Secret or ConfigMap, optionally, and names none of the variables it
+    # injects -- so nothing named below would see them (§15).
+    check "no environment arrives wholesale through envFrom (§15)" \
+        "0" "$(read_ "$job" "($pod.containers[0].envFrom // []) | length")"
 }
 
 checkJobLabels() {
@@ -232,6 +292,12 @@ checkWritablePaths() {
 checkCredentialWiring() {
     local job=$1 env=".spec.template.spec.containers[0].env"
 
+    # An entry with a name and neither `value:` nor `valueFrom:` is the third road to #14:
+    # Kubernetes materialises it as the empty string, the API server accepts it, and the two
+    # exhaustive lists below cannot see it because each filters on one of the two keys. This
+    # assertion is what makes those lists exhaustive, so it comes first.
+    check "every environment entry actually supplies a value (#14)" \
+        "0" "$(read_ "$job" "[${env}[] | select((has(\"value\") or has(\"valueFrom\")) | not)] | length")"
     check "no environment entry is an empty literal value (#14)" \
         "0" "$(read_ "$job" "[${env}[] | select(.value == \"\")] | length")"
     check "no secret reference is optional (#14)" \
@@ -242,38 +308,65 @@ checkCredentialWiring() {
     check "credentials arrive by secretKeyRef, and these are the ones (#20)" \
         "CLAUDE_CODE_OAUTH_TOKEN GITHUB_TOKEN" \
         "$(read_ "$job" "[${env}[] | select(has(\"valueFrom\")) | .name] | sort | join(\" \")")"
-    # Both lists are exhaustive on purpose: between them they pin every environment entry the
-    # container gets, so a variable added without a decision -- an OPENAI_API_KEY that does not
-    # in fact authenticate Codex (#3), say -- fails here whichever way it was wired.
+    # The two lists partition the entries by which key supplies them, so between them they pin
+    # every entry -- but only because the assertion above rules out an entry with neither key,
+    # and only because checkPodShape rules out a second container and an envFrom. A variable
+    # added without a decision -- an OPENAI_API_KEY that does not in fact authenticate Codex
+    # (#3), say -- then fails here whichever way it was wired.
     check "the run context arrives as plain values, and these are the ones (§15)" \
         "AGENT GITHUB_ISSUE_NUMBER GITHUB_REPOSITORY SANDCASTLE_RUN_ID" \
         "$(read_ "$job" "[${env}[] | select(has(\"value\")) | .name] | sort | join(\" \")")"
 }
 
+# A substituted value is text, and YAML reads some text as something else. `0755`, `123` and
+# `true` are all valid DNS-1123 labels and so all valid run IDs, and an unquoted placeholder
+# renders each as an integer or a boolean, which the API server rejects for a label value and
+# for an env value. The ordinary sample run ID cannot show this -- it has a hyphen in it -- so
+# the template is rendered a second time with a run ID shaped like a number, and the types of
+# what came out are asserted rather than the values.
+checkScalarTypes() {
+    local job=$1
+
+    check "the Job's run label survives a numeric-shaped run ID as text" \
+        "!!str" "$(read_ "$job" '.metadata.labels."sandcastle.run" | tag')"
+    check "the Pod's run label survives a numeric-shaped run ID as text" \
+        "!!str" "$(read_ "$job" '.spec.template.metadata.labels."sandcastle.run" | tag')"
+    check "every environment value is text, whatever it was substituted from (§15)" \
+        "!!str" \
+        "$(read_ "$job" \
+            '[.spec.template.spec.containers[0].env[] | select(has("value")) | .value | tag] | unique | join(" ")')"
+}
+
 main() {
-    local workDir job
+    local workDir job numericJob
 
     requireTools
 
-    # A directory rather than a bare temporary file, so the rendering keeps its .yaml name:
+    # A directory rather than a bare temporary file, so the renderings keep their .yaml names:
     # kubeconform decides what to read from the file extension.
     workDir=$(mktemp -d)
     # shellcheck disable=SC2064 # $workDir is expanded now on purpose.
     trap "rm -rf '$workDir'" EXIT
     job="$workDir/job.yaml"
+    numericJob="$workDir/numeric-run-id.yaml"
     "$SCRIPT_DIR/render-job.sh" "$SAMPLE_RUN_ID" "$SAMPLE_REPOSITORY" "$SAMPLE_ISSUE_NUMBER" >"$job"
+    "$SCRIPT_DIR/render-job.sh" \
+        "$SAMPLE_NUMERIC_RUN_ID" "$SAMPLE_REPOSITORY" "$SAMPLE_ISSUE_NUMBER" >"$numericJob"
 
     schemaCheck "$job"
+    checkManifestSet
 
     checkNamespace
     checkServiceAccount
     checkJobShape "$job"
+    checkPodShape "$job"
     checkJobLabels "$job"
     checkImageIsPinned "$job"
     checkSecurityContext "$job"
     checkResources "$job"
     checkWritablePaths "$job"
     checkCredentialWiring "$job"
+    checkScalarTypes "$numericJob"
 
     log "$PASSED assertions passed, $FAILED failed"
     [ "$FAILED" -eq 0 ] || exit 1

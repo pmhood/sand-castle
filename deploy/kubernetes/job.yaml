@@ -10,6 +10,12 @@
 # the same three. Everything else is a deliberate constant, so a run differs from a run only in
 # which repository and issue it is pointed at.
 #
+# Every placeholder is quoted, without exception, because a substituted value is text and YAML
+# would otherwise read some of it as something else: run IDs like `123`, `0755` or `true` are
+# all valid DNS-1123 labels, and unquoted they render as an integer or a boolean, which the API
+# server rejects for a label value and for an env value. The rule is uniform rather than
+# case-by-case so that a fourth placeholder cannot be added on the wrong side of it.
+#
 # `AGENT` is a constant here, not a placeholder, because the agent and its credential have to
 # change together: rendering AGENT=codex against the Claude OAuth secret below would produce a
 # Job that starts and then fails to authenticate. README.md has the two-line edit for Codex.
@@ -17,11 +23,11 @@ apiVersion: batch/v1
 kind: Job
 
 metadata:
-  name: sandcastle-${RUN_ID}
+  name: "sandcastle-${RUN_ID}"
   namespace: sandcastle-agents
   labels:
     app: sandcastle
-    sandcastle.run: ${RUN_ID}
+    sandcastle.run: "${RUN_ID}"
 
 spec:
   # An agent run is not idempotent -- it clones, branches, edits, and in later phases pushes
@@ -42,7 +48,7 @@ spec:
     metadata:
       labels:
         app: sandcastle
-        sandcastle.run: ${RUN_ID}
+        sandcastle.run: "${RUN_ID}"
 
     spec:
       # §19: the run either completes or fails. `OnFailure`, the only alternative a Job allows,
@@ -89,10 +95,10 @@ spec:
           # missing rather than guessing.
           env:
             - name: SANDCASTLE_RUN_ID
-              value: ${RUN_ID}
+              value: "${RUN_ID}"
 
             - name: GITHUB_REPOSITORY
-              value: ${GITHUB_REPOSITORY}
+              value: "${GITHUB_REPOSITORY}"
 
             - name: GITHUB_ISSUE_NUMBER
               value: "${GITHUB_ISSUE_NUMBER}"

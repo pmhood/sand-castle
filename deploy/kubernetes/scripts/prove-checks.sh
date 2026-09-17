@@ -21,8 +21,13 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC2155
 readonly MANIFEST_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Three fields per mutation -- manifest, yq expression, and the property it removes -- flat
-# rather than nested, because bash 3.2 (what a developer Mac runs) has no nested arrays.
+# Three fields per mutation -- manifest, mutation, and the property it removes -- flat rather
+# than nested, because bash 3.2 (what a developer Mac runs) has no nested arrays.
+#
+# A mutation is normally a yq expression. A mutation that begins with `---` is instead a literal
+# YAML document appended to the manifest, which is the only way to express the two mistakes yq
+# cannot make for us: a second document smuggled into an existing file, and a whole new manifest
+# file appearing in the directory.
 readonly MUTATIONS=(
     job.yaml
     '.spec.template.spec.containers[0].image = "ghcr.io/pmhood/sandcastle-agent:latest"'
@@ -47,6 +52,18 @@ readonly MUTATIONS=(
     job.yaml
     'del(.spec.ttlSecondsAfterFinished)'
     'a finished Job is cleaned up on a TTL'
+
+    job.yaml
+    '.spec.ttlSecondsAfterFinished = 1'
+    'the TTL is the 24 hours §47 was reasoned into, not merely some number'
+
+    job.yaml
+    '.spec.parallelism = 2'
+    'one run means one Pod at a time'
+
+    job.yaml
+    '.spec.completions = 3'
+    'one run means one completion'
 
     job.yaml
     'del(.spec.template.metadata.labels."sandcastle.run")'
@@ -117,6 +134,34 @@ readonly MUTATIONS=(
     'no environment entry is an empty literal value'
 
     job.yaml
+    '.spec.template.spec.containers[0].env += [{"name": "CLAUDE_CONFIG_DIR"}]'
+    'an entry with neither value nor valueFrom, which Kubernetes materialises as empty'
+
+    job.yaml
+    '.spec.template.spec.containers[0].envFrom = [{"secretRef": {"name": "sandcastle-misc", "optional": true}}]'
+    'no environment arrives wholesale, and unnamed, through envFrom'
+
+    job.yaml
+    '.spec.template.spec.containers += [{"name": "sidecar", "image": "busybox", "env": [{"name": "GITHUB_TOKEN", "value": "ghp-not-a-real-token"}]}]'
+    'the container the assertions read is the only container there is'
+
+    job.yaml
+    '.spec.template.spec.initContainers = [{"name": "setup", "image": "busybox", "securityContext": {"privileged": true}}]'
+    'no init container runs before the agent, unexamined'
+
+    job.yaml
+    '.spec.template.spec.ephemeralContainers = [{"name": "debug", "image": "busybox"}]'
+    'no ephemeral container is declared alongside the agent'
+
+    job.yaml
+    '.metadata.labels."sandcastle.run" style=""'
+    'a placeholder stays quoted, so a numeric-shaped run ID renders as text'
+
+    job.yaml
+    '(.spec.template.spec.containers[0].env[] | select(.name == "SANDCASTLE_RUN_ID")).value style=""'
+    'an environment value stays quoted, so a numeric-shaped run ID renders as text'
+
+    job.yaml
     '.spec.template.spec.containers[0].env += [{"name": "OPENAI_API_KEY", "valueFrom": {"secretKeyRef": {"name": "sandcastle-openai", "key": "key"}}}]'
     'the set of credential variables is exactly the agreed one'
 
@@ -131,6 +176,30 @@ readonly MUTATIONS=(
     namespace.yaml
     '.metadata.labels."pod-security.kubernetes.io/enforce" = "privileged"'
     'the namespace enforces the restricted Pod Security standard'
+
+    job.yaml
+    '---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: smuggled
+  namespace: sandcastle-agents
+spec:
+  containers:
+    - name: smuggled
+      image: busybox'
+    'a manifest holds one document, so nothing rides along behind the Job'
+
+    extra.yml
+    '---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stray
+  namespace: sandcastle-agents
+data:
+  note: a manifest no assertion below ever reads'
+    'every manifest in the directory is one the validator knows about'
 )
 
 PROVEN=0
@@ -172,6 +241,17 @@ proveControl() {
     die "the manifests as committed do not pass validation; nothing below would mean anything"
 }
 
+# A `---` mutation is appended verbatim, which turns a manifest into a two-document file, or
+# creates one that was not there at all. Anything else is a yq expression.
+applyMutation() {
+    local file=$1 mutation=$2
+
+    case $mutation in
+        ---*) printf '%s\n' "$mutation" >>"$file" ;;
+        *) yq -i "$mutation" "$file" ;;
+    esac
+}
+
 # The assertion that caught the mutation is reported alongside it, so that a mutation which
 # fails validation for some unrelated reason is visible as the false positive it is.
 proveMutation() {
@@ -180,7 +260,7 @@ proveMutation() {
 
     mkdir -p "$copy"
     copyManifests "$copy"
-    yq -i "$expression" "$copy/$manifest" || die "mutation $index is not a valid yq expression"
+    applyMutation "$copy/$manifest" "$expression" || die "mutation $index could not be applied"
 
     output=$("$copy/scripts/validate.sh" 2>&1) || status=$?
     if [ "$status" -eq 0 ]; then

@@ -162,13 +162,21 @@ outside the namespace; they arrive with the server in Phase 3.
 #14 cost this repository a real bug: an empty `CLAUDE_CONFIG_DIR` made the Claude CLI resolve
 its config directory relative to the working directory and write `backups/`, `projects/` and
 `sessions/` into the checkout the agent was editing, which Phase 6 would then commit and push.
-A Pod spec offers two ways to reproduce it exactly -- an `env:` entry with an empty `value:`,
-and a `secretKeyRef` with `optional: true` pointing at a key that does not exist. Both
-materialise a variable the CLI reads back as set.
+A Pod spec offers three ways to reproduce it exactly, and the third is the quiet one:
+
+- an `env:` entry with an empty `value:`;
+- a `secretKeyRef` with `optional: true` pointing at a key that does not exist;
+- an `env:` entry with a name and *neither* `value:` nor `valueFrom:`, which the API server
+  accepts and which Kubernetes materialises as the empty string.
+
+All three materialise a variable the CLI reads back as set. The third is the one to keep in
+mind while making the Codex edit above by hand, because it looks like an unfinished line rather
+than a mistake.
 
 So: run context arrives as plain values, credentials arrive only by required `secretKeyRef`,
-and `validate.sh` asserts all three halves of that -- no empty literal value, no optional
-secret reference, nothing credential-shaped carrying a literal value.
+and `validate.sh` asserts all four halves of that -- every entry supplies a value, no empty
+literal value, no optional secret reference, nothing credential-shaped carrying a literal
+value.
 
 ## Validating without a cluster
 
@@ -183,17 +191,33 @@ its own (`.github/workflows/kubernetes-manifests.yml`).
 Both need `kubeconform` and `yq` (`brew install kubeconform yq`; CI installs pinned release
 binaries). `validate.sh` renders `job.yaml` with a fixed sample run context, schema-validates
 every manifest with `kubeconform -strict`, and then asserts the properties a schema cannot see:
-the image is a digest and not a tag, `backoffLimit` is 0, the §50 security context is present
-and set as it should be, `automountServiceAccountToken` is false on both the Pod and the
-ServiceAccount, the resource limits are §23's, the writable paths are mounted and are
-`emptyDir`s, and no `env:` entry carries a literal credential value.
+the image is a digest and not a tag, `backoffLimit` is 0, the TTL is §47's 24 hours, the §50
+security context is present and set as it should be, `automountServiceAccountToken` is false on
+both the Pod and the ServiceAccount, the resource limits are §23's, the writable paths are
+mounted and are `emptyDir`s, and no `env:` entry carries a literal credential value.
 
-Two details are load-bearing. `-strict` is what catches a *misspelled* field:
+Some of those assertions are only as good as the shape of the thing they read, so the shape is
+asserted too. An assertion about `containers[0]` says nothing about a sidecar; an exhaustive
+list of `env:` entries says nothing about an `envFrom:`, an `initContainer` or a second
+container; and every one of them reads document 0 of its file, so a second document appended
+behind the Job would be schema-checked and then never looked at again. `validate.sh` therefore
+pins the shape as well as the contents: exactly one container, no init or ephemeral containers,
+no `envFrom`, one document per manifest, one Pod per run (`parallelism`/`completions`), and a
+manifest set that is exactly the three files named above -- so a fourth manifest is a decision
+someone has to make here rather than a file nothing reads.
+
+Three details are load-bearing. `-strict` is what catches a *misspelled* field:
 `readOnlyRootFileSystem` (capital S) is silently ignored by the API server, and by a non-strict
-check, and would leave the root filesystem writable while looking correct. And the schema step
+check, and would leave the root filesystem writable while looking correct. The schema step
 asserts kubeconform's summary as well as its exit status, because kubeconform exits 0 having
 validated nothing when it skips a file whose extension it does not recognise -- which is what
-the first draft of this script did to the rendered Job.
+the first draft of this script did to the rendered Job. And the template is rendered a *second*
+time with a run ID shaped like a number (`0755`), because every placeholder substitutes text
+into YAML that may read it as something else: unquoted, that run ID renders as an integer and
+the API server refuses the Job outright (`cannot unmarshal number into Go struct field
+ObjectMeta.metadata.labels of type string`). The assertions on that rendering are about types,
+not values. Every placeholder in `job.yaml` is quoted for this reason, uniformly, including the
+ones that happen to be safe today.
 
 Assertions are plain commands and helper functions that return explicitly, never a bare
 `[[ ]]`, so they bite under the bash 3.2 macOS ships as well as under bash 5 -- the house rule
@@ -203,10 +227,16 @@ second bats suite would mean a second copy of the suite's bootstrapping and a st
 does not reach it, for assertions that need neither.
 
 `prove-checks.sh` is the other half of the house rule. It copies the manifests, breaks exactly
-one property with `yq`, runs `validate.sh` against the copy and requires it to fail, once per
-property, and reports which assertion caught each one so that a mutation failing for an
-unrelated reason is visible. It starts with an unmutated control run, because nothing is proven
-by a mutation failing if validation fails anyway.
+one property, runs `validate.sh` against the copy and requires it to fail, once per property,
+and reports which assertion caught each one so that a mutation failing for an unrelated reason
+is visible. It starts with an unmutated control run, because nothing is proven by a mutation
+failing if validation fails anyway. A mutation is normally a `yq` expression; one that begins
+with `---` is a literal YAML document appended to the manifest instead, which is the only way
+to express the two mistakes `yq` cannot make for us -- a second document smuggled into an
+existing file, and a whole new manifest appearing in the directory.
+
+Adding an assertion means adding its mutation. An assertion with no mutation behind it is a
+line nobody has checked, which is the state #8 found 49 of.
 
 ### Against the real cluster
 

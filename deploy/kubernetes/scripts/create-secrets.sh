@@ -241,6 +241,21 @@ applySecret() {
 # go-template over `.data`, which prints the keys and not the values; the length is the decoded
 # value piped straight into `wc -c`, counted and discarded without ever being printed or
 # assigned. `-o jsonpath={.data.token}` would print the credential itself.
+#
+# Both templates below must stay *static*, and the reason is not tidiness. When a go-template
+# fails at execution time -- an `index` into something that is not a map, a method call on a
+# missing field -- kubectl does not merely report the error: it prints `raw data was: {...}`,
+# the whole object it was rendering, which for a Secret is every key and its base64-encoded
+# value. It does that on stderr and **exits 0**. The first call captures stderr into $keys and
+# reports it in the failure message, so a template that can fail turns this verify path into a
+# credential dump in a log the operator is likely to paste somewhere; the second call would
+# pipe the dump into `wc -c`, which is harmless only by luck of where it goes.
+#
+# Neither fixed template can reach that: ranging over an absent or empty `.data` yields the
+# empty string cleanly, which is the "(none)" case below, and `index` on a key checked to exist
+# a moment earlier cannot fail. Interpolating anything an operator or a caller controls into
+# either one removes that guarantee. If a dynamic template ever becomes necessary, keep
+# kubectl's stderr out of the message rather than trusting the template.
 verifySecret() {
     local name=$1 key=$2 keys bytes
 

@@ -263,13 +263,19 @@ EOF
 # The store is written by `apply` out of what it was piped, never by `create --dry-run`: a fake
 # that recorded the intent instead of the delivery would be satisfied by a script that rendered
 # a Secret and applied nothing.
+#
+# deploy/kubernetes/scripts/launch-run.sh asks it about Jobs, Pods, events and logs as well, and
+# those answers are not invented here: a test writes them into $KUBECTL_RECORD/state, and what
+# launch.bats writes there is output recorded from a real k3s cluster, one failure mode at a
+# time. The fake decides *which* answer a query wants from the shape of the jsonpath, so it
+# stays a stand-in for kubectl rather than a second implementation of the launcher.
 installFakeKubectl() {
     local root bin
     root=${BATS_TEST_TMPDIR:-${BATS_FILE_TMPDIR-}}
     [[ -n $root ]] || return 0
     bin="$root/bin"
     KUBECTL_RECORD="$root/kubectl-record"
-    mkdir -p "$bin" "$KUBECTL_RECORD/store"
+    mkdir -p "$bin" "$KUBECTL_RECORD/store" "$KUBECTL_RECORD/state"
 
     cat >"$bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
@@ -279,9 +285,15 @@ set -euo pipefail
 
 record=$KUBECTL_RECORD
 store="$record/store"
+state="$record/state"
 
 printf '%s\n' "$@" >>"$record/argv"
 printf '%s\n' "$*" >>"$record/commands"
+
+# Whatever the test put there, or nothing at all, which is what an absent field looks like.
+canned() {
+    cat "$state/$1" 2>/dev/null || true
+}
 
 # The flags the scripts pass, pulled out wherever they sit, so the fake does not depend on
 # their order. Everything else is left in "$@" for the verb match below.
@@ -300,9 +312,15 @@ while [ $# -gt 0 ]; do
         -o) outputFormat=$2; shift 2 ;;
         -o*) outputFormat=${1#-o}; shift ;;
         --dry-run=*) shift ;;
+        -l) shift 2 ;;
+        --field-selector) shift 2 ;;
+        --container) shift 2 ;;
         -f) shift 2 ;;
         *) verb+=("$1"); shift ;;
     esac
+    # `logs -f <pod>` is a follow flag and a pod name, not a filename: once the verb is known to
+    # be `logs`, nothing after it may be read as one of the flags above.
+    if [ "${verb[0]-}" = logs ]; then break; fi
 done
 
 fail() {
@@ -343,8 +361,22 @@ case "${verb[*]-}" in
     apply)
         manifest=$(cat)
         printf '%s\n' "$manifest" >>"$record/stdin"
-        name=$(printf '%s\n' "$manifest" | sed -n 's/^  name: //p')
+        name=$(printf '%s\n' "$manifest" | sed -n 's/^  name: //p' | tr -d '"')
         [ -n "$name" ] || fail "applied manifest has no metadata.name"
+
+        # A Job is not a Secret and has no `data:`; it goes in the record and nowhere else.
+        # An applied Job is also what makes `get job <name>` start answering, so a launcher
+        # that checked for a name collision *after* applying would see its own Job.
+        case $manifest in
+            *"kind: Job"*)
+                printf '%s\n' "$name" >"$state/applied-job"
+                # PSA admits the Job and refuses the Pod, so the refusal arrives as a warning
+                # on stderr beside a successful create. The test supplies the text.
+                [ ! -f "$state/applyWarning" ] || cat "$state/applyWarning" >&2
+                printf 'job.batch/%s created\n' "$name"
+                exit 0
+                ;;
+        esac
         # One file per key, so a second apply of the same Secret replaces rather than adds --
         # and so a test can count what a script left behind. Only the entries under `data:`
         # are read: a key/value shape elsewhere in the manifest is metadata, not a secret.
@@ -382,6 +414,39 @@ case "${verb[*]-}" in
         esac
         ;;
 
+    "get serviceaccount "*)
+        [ "${KUBECTL_FAKE_SERVICEACCOUNT_MISSING:-no}" = no ] ||
+            fail "Error from server (NotFound): serviceaccounts \"${verb[2]}\" not found"
+        printf 'serviceaccount/%s\n' "${verb[2]}"
+        ;;
+
+    "get job "*)
+        # Two questions wear the same verb: "does this Job already exist" (the launcher's
+        # collision check, before anything is applied) and "how did it end" (its conditions).
+        case $outputFormat in
+            jsonpath=*conditions*) canned jobConditions ;;
+            *)
+                [ -f "$state/job-exists" ] || [ -f "$state/applied-job" ] ||
+                    fail "Error from server (NotFound): jobs.batch \"${verb[2]}\" not found"
+                printf 'job.batch/%s\n' "${verb[2]}"
+                ;;
+        esac
+        ;;
+
+    "get pod" | "get pod "*)
+        # Which answer a query wants is decided by the shape of the jsonpath, so the launcher
+        # can change what it asks for without this fake having to agree field by field.
+        case $outputFormat in
+            *metadata.name*) canned podName ;;
+            *PodScheduled*) canned schedulingFacts ;;
+            *) canned podFacts ;;
+        esac
+        ;;
+
+    "get events") canned jobCreateFailure ;;
+
+    logs*) canned logs ;;
+
     *) fail "unsupported invocation: ${verb[*]-}" ;;
 esac
 EOF
@@ -390,6 +455,7 @@ EOF
     export KUBECTL_RECORD="$KUBECTL_RECORD"
     export KUBECTL_FAKE_NAMESPACE=sandcastle-agents
     export KUBECTL_FAKE_NAMESPACE_MISSING=no
+    export KUBECTL_FAKE_SERVICEACCOUNT_MISSING=no
     export PATH="$bin:$PATH"
 }
 

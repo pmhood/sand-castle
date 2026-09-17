@@ -13,37 +13,231 @@ deploy/kubernetes/
 └── scripts/
     ├── create-secrets.sh the two credential Secrets the Job reads (§14, §15)
     ├── render-job.sh     substitutes the placeholders; the only renderer
+    ├── launch-run.sh     runs one run and follows it; the Phase 2 command (§36)
     ├── validate.sh       kubeconform + property assertions; what CI runs
     └── prove-checks.sh   breaks each property and requires validate.sh to notice
 ```
 
 No Helm chart, no Kustomize overlays, no templating engine. §36 is one Job run by hand and §54
 is explicit that the CRD is not to be built first; the same restraint applies to packaging.
-The launcher (#21) will render the same template from the same script.
+`launch-run.sh` is a shell script over `kubectl`, not the beginning of a controller: §37 is
+where a server first creates a Job, and it will render this same template from the same
+`render-job.sh`.
 
 ## Running one
 
-In apply order -- the Job controller refuses to create a Pod whose ServiceAccount or Secret is
-missing, and says so only in the Job's events:
+Once, to set the cluster up:
 
 ```sh
 kubectl apply -f deploy/kubernetes/namespace.yaml
 kubectl apply -f deploy/kubernetes/serviceaccount.yaml
 ./deploy/kubernetes/scripts/create-secrets.sh                # see "Credentials" below
-./deploy/kubernetes/scripts/render-job.sh <run-id> <owner/repo> <issue-number> | kubectl apply -f -
 ```
 
-Then watch it, by the label §20 asks for:
+Then, per run:
 
 ```sh
-kubectl -n sandcastle-agents logs -f -l sandcastle.run=<run-id>
+./deploy/kubernetes/scripts/launch-run.sh <owner/repo> <issue-number>
+```
+
+That renders `job.yaml` for a fresh run ID, applies it, follows the Pod's logs live, and exits
+with the run's result. It is the cluster counterpart of `images/agent/scripts/smoke.sh` and
+behaves like it: the environment beats the arguments (`GITHUB_REPOSITORY`,
+`GITHUB_ISSUE_NUMBER`, `AGENT`, and `RUN_ID` to override the generated run ID), validation
+happens before anything is applied, and **no credential is ever an argument**. It needs none of
+its own -- see "No credential passes through the launcher" below.
+
+Its exit status is the run's:
+
+| Status | Meaning |
+| --- | --- |
+| `0` | the agent ran and exited 0 |
+| `64` | the arguments are wrong (`EX_USAGE`); nothing was applied |
+| `69` | the run never ran, or the cluster ended it (`EX_UNAVAILABLE`) |
+| anything else | the agent's own exit code |
+
+The message is always the authority on which layer failed; the code is for whatever wraps the
+script. Three environment variables tune the waiting, and exist because a cold image pull and a
+hung scheduler need different patience:
+
+- `SANDCASTLE_START_TIMEOUT` (default `300`) bounds **each** of the two waits before the logs
+  start -- the Job producing a Pod, and that Pod's container starting -- so a run that stalls in
+  both spends up to twice it before the launcher gives up. They are separate waits because they
+  fail for different reasons and get different messages, and one number is enough for both:
+  neither is a deadline on the run, which is `activeDeadlineSeconds`' job (§23).
+- `SANDCASTLE_FINISH_TIMEOUT` (default `60`) bounds the wait after the logs end for the Pod's
+  exit status to appear.
+- `SANDCASTLE_POLL_INTERVAL` (default `2`) is how often each of those three asks.
+
+### By hand, without the launcher
+
+The same four steps, if you want to watch the pieces:
+
+```sh
+./deploy/kubernetes/scripts/render-job.sh <run-id> <owner/repo> <issue-number> | kubectl apply -f -
 kubectl -n sandcastle-agents get job -l sandcastle.run=<run-id>
+kubectl -n sandcastle-agents logs -f -l sandcastle.run=<run-id>
 ```
 
 `render-job.sh` validates what it substitutes -- the run ID must be a DNS-1123 label short
 enough to prefix, the repository must be `owner/repo`, the issue must be a positive integer --
 and refuses an empty value rather than rendering `sandcastle-` and a Job that collides with the
-next one.
+next one. `launch-run.sh` adds no validation of its own on top of it; it calls it and inherits
+its messages.
+
+The one thing the launcher checks that these commands do not is the **agent**: it takes
+`[agent]` as a third argument and compares it with what `job.yaml` sets, rather than
+substituting it. `AGENT` is deliberately not a placeholder (see "Running Codex instead of
+Claude"), so asking for an agent the manifest does not run is refused rather than half-done.
+
+## What a successful run prints
+
+`[LAUNCH]` lines go to stderr; the run's own output is relayed to stdout verbatim, already
+carrying the §31 prefixes the bootstrap gave it. The two can therefore be separated, and
+nothing rewrites the Pod's logs on the way through.
+
+```text
+[LAUNCH] Run run-20260917-021433-165e55
+[LAUNCH]   Repository: octocat/Hello-World
+[LAUNCH]   Issue:      #1
+[LAUNCH]   Agent:      claude
+[LAUNCH]   Image:      ghcr.io/pmhood/sandcastle-agent@sha256:de6e6b92…
+[LAUNCH]   Namespace:  sandcastle-agents
+[SECRETS] sandcastle-github-token: key 'token' present, 40 bytes (value not shown)
+[SECRETS] sandcastle-claude-oauth: key 'token' present, 108 bytes (value not shown)
+[SECRETS] Both Secrets are present with the keys job.yaml expects
+[LAUNCH] Applying sandcastle-run-20260917-021433-165e55
+[LAUNCH]   job.batch/sandcastle-run-20260917-021433-165e55 created
+[LAUNCH] Pod sandcastle-run-20260917-021433-165e55-jz682 created
+[LAUNCH] Following sandcastle-run-20260917-021433-165e55-jz682 (stdout below is the run's own)
+
+[SANDCASTLE] Environment validated
+[SANDCASTLE] Run run-20260917-021433-165e55 started
+[GIT] Cloning octocat/Hello-World from https://github.com
+[GITHUB] Issue #1 read
+[CLAUDE] Starting Claude Code CLI
+…
+[LAUNCH] Run run-20260917-021433-165e55 PASSED: the agent exited 0
+```
+
+The `[SECRETS]` lines are `create-secrets.sh --verify`, which the launcher runs as its
+credential preflight rather than having a second opinion about what the Secrets are called.
+
+## When a run fails
+
+This is the section §36 is really for. A run that produces no result looks the same from
+outside whatever the reason -- a Pod that never starts is a Pod that never starts -- so the
+launcher names the **layer** and what to do, and quotes what Kubernetes said underneath it,
+labelled as such. An operator should never have to read `kubectl describe` output to find out
+that a Secret key was misspelled.
+
+```text
+[LAUNCH] FAILED at the image layer: the image has no build for this node's architecture
+[LAUNCH]   Fix: publish the image for this node's platform (images/agent CI builds linux/amd64
+[LAUNCH]        and linux/arm64), or schedule the run on a node it was built for
+[LAUNCH]   Kubernetes said:
+[LAUNCH]     rpc error: code = NotFound desc = failed to pull and unpack image
+[LAUNCH]     "docker.io/arm64v8/alpine:3.20": no match for platform in manifest: not found
+```
+
+Every row below was induced on the k3s cluster with obviously fake values, and the strings the
+launcher matches are what Kubernetes actually said rather than what it seemed likely to say.
+
+| Layer | What happened | How it is detected | Likeliest fix |
+| --- | --- | --- | --- |
+| `kubectl` | no `kubectl` on `PATH` | `command -v` | install it, set `KUBECONFIG` |
+| `cluster` | the cluster is not reachable | `kubectl get namespace` stderr: `Unable to connect`, `connection refused`, `no such host` | check `KUBECONFIG`, check the cluster is up |
+| `cluster` | this kubeconfig may not look | the same stderr: `Unauthorized`, `forbidden` | use a context with access to the namespace |
+| `cluster` | the namespace is missing | the same call, any other error | `kubectl apply -f namespace.yaml` |
+| `cluster` | the ServiceAccount is missing | `kubectl get serviceaccount` before applying | `kubectl apply -f serviceaccount.yaml` |
+| `cluster` | the run ID is already a Job | `kubectl get job` before applying | pick another `RUN_ID`, or delete that Job |
+| `credentials` | a Secret is missing, misnamed, or holds the wrong key | `create-secrets.sh --verify`, before applying | `create-secrets.sh` |
+| `cluster` | the API server refused the Job | non-zero `kubectl apply` | `validate.sh`, then fix `job.yaml` |
+| `admission` | the Pod will be refused by Pod Security Admission | `would violate PodSecurity` in `apply`'s output | restore the §50 security context |
+| `admission` | the Pod *was* refused by admission | the Job's `FailedCreate` event: `violates PodSecurity` | as above |
+| `cluster` | the ServiceAccount vanished after preflight | the same event: `error looking up service account` | `kubectl apply -f serviceaccount.yaml` |
+| `image` | the registry has no such image | `ErrImagePull`/`ImagePullBackOff` + `not found`, `failed to resolve reference` | check the digest pinned in `job.yaml` |
+| `image` | the registry refused the pull | the same + `failed to authorize`, `403 Forbidden`, `denied` | make the GHCR package public, or add an `imagePullSecret` |
+| `image` | no build for this node's architecture | the same + `no match for platform` | publish for the node's platform, or move the run |
+| `credentials` | a Secret or key the Pod needs is not there | `CreateContainerConfigError`, whose message names the Secret *or the key* | `create-secrets.sh --verify`, compare with `job.yaml` |
+| `runtime` | the container could not be created | `CreateContainerError`, `RunContainerError` | read the quoted runtime message |
+| `runtime` | the container's process could not start | terminated `StartError` | the image's entrypoint, not the agent |
+| `runtime` | it exceeded its memory limit | terminated `OOMKilled` (exit 137) | raise the memory limit (§23) |
+| `scheduling` | no node could take the Pod | `PodScheduled=False`, reason `Unschedulable` | free capacity, or lower the requests (§23) |
+| `scheduling` | the node evicted the Pod | Pod phase `Failed`, reason `Evicted` | node pressure; retry or give it room |
+| `timeout` | it hit `activeDeadlineSeconds` | the **Job's** condition `DeadlineExceeded` | raise it in `job.yaml` if the work is genuinely longer |
+| `cluster` | no Pod within `SANDCASTLE_START_TIMEOUT` | nothing else fired | `kubectl describe job` |
+| `cluster` | no container started within it | nothing else fired | `kubectl describe pod` |
+| **`agent`** | **the run started and exited non-zero** | terminated `Error` with a non-zero exit code | the run's own output above; this is *not* a cluster problem |
+
+Four of those are worth their own paragraph.
+
+**The architecture mismatch is tested before the missing image**, because its message also ends
+in `not found`. It is the failure that looks least like what it is: the digest is right, the
+registry is right, and the node simply cannot run any image in the manifest list.
+
+**`activeDeadlineSeconds` erases its own evidence.** The Job controller deletes the Pod, so the
+deadline can only be read from the Job's conditions -- and it has to be read *wherever* a Pod is
+being waited for, because a deadline that expires before the Pod is even scheduled otherwise
+looks exactly like a Pod that never appeared. An earlier draft of the launcher reported it as
+"the Job created no Pod", which is true and useless.
+
+**Pod Security Admission runs against the Pod, not the Job.** A Job that violates the profile is
+*accepted*, with a warning on `kubectl apply`, and then never produces a Pod. The launcher fails
+on that warning rather than waiting out the start timeout to say the same thing.
+
+**An image pull failure is reported the first time it is seen.** A genuinely transient registry
+outage therefore surfaces here too; the quoted message is what tells the two apart, and
+re-running is the answer.
+
+## Teardown
+
+`ttlSecondsAfterFinished: 86400` cleans up after itself: 24 hours after a Job **finishes** --
+successfully or not -- the Job and its Pod are deleted by the TTL controller, and with them the
+only copy of the run's logs (§47, and see "Decisions worth their own paragraph").
+
+The TTL clock starts when the Job *finishes*, which a Job that never starts a container does
+not do on its own. `activeDeadlineSeconds: 1800` is what makes those finish: it is a deadline on
+the **Job**, not on the container, so it fails a Job that is stuck in `ImagePullBackOff` or
+whose Pod admission keeps refusing just as it fails a run that is taking too long -- confirmed
+on the cluster, where a one-second deadline failed a Job before its Pod had been scheduled.
+So nothing here leaks: every run is reaped within half an hour plus a day, at worst. Half an
+hour is a long time to leave a Job that is plainly not going anywhere, so every failing launch
+prints the three commands for the run it just left behind:
+
+```sh
+kubectl -n sandcastle-agents describe job sandcastle-<run-id>   # why
+kubectl -n sandcastle-agents logs -l sandcastle.run=<run-id>    # what it printed
+kubectl -n sandcastle-agents delete job sandcastle-<run-id>     # now, rather than in 24h
+```
+
+Deleting the Job deletes its Pod: ownership is a `metadata.ownerReferences` entry the Job
+controller sets, and `kubectl delete job` cascades by default. To clear out every finished run
+at once:
+
+```sh
+kubectl -n sandcastle-agents delete job -l app=sandcastle
+```
+
+The Secrets, the ServiceAccount and the namespace are not a run's to remove and none of these
+touch them.
+
+## No credential passes through the launcher
+
+`launch-run.sh` takes no credential, reads none, and needs none: the run's two credentials reach
+the Pod through the `secretKeyRef` entries `job.yaml` already carries, which the kubelet resolves
+from the Secrets `create-secrets.sh` put in the cluster (§15, §52). There is no value in the
+launcher to put in argv, in the applied manifest, or in a log line.
+
+That is a property to keep rather than a happy accident, so it is asserted the way #2's rule is
+asserted everywhere else here: `images/agent/bootstrap/test/launch.bats` runs the launcher with
+obviously-fake credentials exported into its environment -- the shape an operator's shell is
+actually in -- against the recording `kubectl` that `helpers.bash` binds on `PATH` at load time,
+and refutes both canaries in three places at once: everything that reached `kubectl`'s argv,
+everything that reached its stdin (which is where the rendered Job goes), and everything the
+launcher printed. Because three refutations would also pass against records that were simply
+empty, a fourth test *requires* the run ID and the digest-pinned image to be in the same two
+records.
 
 ## Credentials
 
@@ -351,12 +545,32 @@ rather than in that suite because they are about `deploy/`, not about the image:
 second bats suite would mean a second copy of the suite's bootstrapping and a style guard that
 does not reach it, for assertions that need neither.
 
-`create-secrets.sh` is the exception, and for the same reason rather than against it: what has
-to be checked about it is a *behaviour* -- what it puts in argv, what it refuses -- which needs
-a recording fake and the assertion helpers the bats suite already has, not a `yq` expression
-over a file. So it is `shellcheck`ed by the `manifests` job here and exercised by
-`images/agent/bootstrap/test/secrets.bats` under the `test` job, where a fake `kubectl` bound at
-`helpers.bash` load time means no test can reach a cluster.
+`create-secrets.sh` and `launch-run.sh` are the exception, and for the same reason rather than
+against it: what has to be checked about them is a *behaviour* -- what they put in argv, what
+they refuse, which failure they name -- which needs a recording fake and the assertion helpers
+the bats suite already has, not a `yq` expression over a file. So both are `shellcheck`ed by the
+`manifests` job here and exercised by `images/agent/bootstrap/test/secrets.bats` and
+`launch.bats` under the `test` job, where a fake `kubectl` bound at `helpers.bash` load time
+means no test can reach a cluster.
+
+`launch.bats` drives that fake with output **recorded from the real cluster**: each failure mode
+was induced there with fake values and the resulting Pod status, Job condition or event was
+copied into the test as a fixture. So the taxonomy is checked against what Kubernetes says
+rather than against what the launcher's author assumed it says, and the fake stays a stand-in
+for `kubectl` rather than a second implementation of the launcher -- it decides which canned
+answer a query wants from the shape of the jsonpath, and knows nothing about failure modes.
+
+Every assertion there was proven to bite the way `prove-checks.sh` proves these: one behaviour
+was broken at a time -- each branch of the image-pull classifier, the `CreateContainerConfigError`
+branch, the deadline check in each of the two places it has to be, the `OOMKilled`, `StartError`
+and `Evicted` branches, each preflight check, the admission checks, the agent's exit code, the
+log relay, and three separate ways of leaking a credential -- and the suite re-run. Each
+mutation was caught, by the test it should have been caught by.
+
+The launcher needs no new assertion in `validate.sh`: what it relies on in `job.yaml` -- an
+`AGENT` entry with a literal value, an `image:` pinned to a digest -- is already pinned there,
+by the assertion that the entries carrying a literal `value:` are exactly `AGENT`,
+`GITHUB_ISSUE_NUMBER`, `GITHUB_REPOSITORY` and `SANDCASTLE_RUN_ID`, and by the digest pattern.
 
 `prove-checks.sh` is the other half of the house rule. It copies the manifests, breaks exactly
 one property, runs `validate.sh` against the copy and requires it to fail, once per property,
@@ -389,6 +603,35 @@ duplicated, lengths tracking the value -- and then both Secrets and the namespac
 live half of the argv property was confirmed there too, the way #2's leak was: polling the
 process table while the script ran found nothing, while the same poller watching a
 `--from-literal` invocation found the value immediately.
+
+`launch-run.sh` has no dry run either, and for a sharper reason: what it is for is the part a
+dry run does not have, which is a Pod that either starts or does not. It was exercised against
+the k3s cluster with obviously-fake Secret values, which is enough to prove everything except an
+agent that authenticates -- the Pod starts, runs as uid 1000 under the §50 context, follows its
+logs live, and fails at the clone with a fake token, which the launcher reports as the agent
+layer with the container's own exit code. Each cluster-layer failure was then induced in turn,
+against a copy of `deploy/kubernetes/` with exactly one thing broken in it: a zeroed digest, an
+arm64-only image, a GHCR package that does not exist, a misspelled `key:`, a 1000-CPU request, a
+`cpu` request above its own limit, a one-second `activeDeadlineSeconds`, `runAsNonRoot: false`,
+a 4Mi memory limit, and -- against the cluster itself -- a deleted ServiceAccount, a deleted
+Secret and an unreachable `KUBECONFIG`. Everything created was deleted afterwards.
+
+The **acceptance run belongs to the repo owner**, like Phase 1's smoke test, because it is the
+half that needs real credentials:
+
+```sh
+export GITHUB_TOKEN=...              # scoped to the one repository the run works in
+export CLAUDE_CODE_OAUTH_TOKEN=...   # from `claude setup-token`; the token, not the banner
+kubectl apply -f deploy/kubernetes/namespace.yaml
+kubectl apply -f deploy/kubernetes/serviceaccount.yaml
+./deploy/kubernetes/scripts/create-secrets.sh
+./deploy/kubernetes/scripts/launch-run.sh <owner/repo> <issue-number>
+```
+
+§36 is proven when that exits 0 having cloned the repository, read the issue and changed files
+in the workspace. A second run against an issue number that does not exist is the other half:
+it must exit non-zero and say `FAILED at the agent layer`, which is the run's own failure and
+not the cluster's.
 
 ### Making the check required
 

@@ -11,6 +11,7 @@ deploy/kubernetes/
 ├── serviceaccount.yaml   the run's identity, with no Kubernetes API token (§50)
 ├── job.yaml              one run, as a Job template with three placeholders (§19, §20)
 └── scripts/
+    ├── create-secrets.sh the two credential Secrets the Job reads (§14, §15)
     ├── render-job.sh     substitutes the placeholders; the only renderer
     ├── validate.sh       kubeconform + property assertions; what CI runs
     └── prove-checks.sh   breaks each property and requires validate.sh to notice
@@ -22,13 +23,13 @@ The launcher (#21) will render the same template from the same script.
 
 ## Running one
 
-The Secrets are #20's and do not exist yet; the Job will not start without them. Once they do,
-in apply order -- the Job controller refuses to create a Pod whose ServiceAccount is missing,
-and says so only in the Job's events:
+In apply order -- the Job controller refuses to create a Pod whose ServiceAccount or Secret is
+missing, and says so only in the Job's events:
 
 ```sh
 kubectl apply -f deploy/kubernetes/namespace.yaml
 kubectl apply -f deploy/kubernetes/serviceaccount.yaml
+./deploy/kubernetes/scripts/create-secrets.sh                # see "Credentials" below
 ./deploy/kubernetes/scripts/render-job.sh <run-id> <owner/repo> <issue-number> | kubectl apply -f -
 ```
 
@@ -44,22 +45,124 @@ enough to prefix, the repository must be `owner/repo`, the issue must be a posit
 and refuses an empty value rather than rendering `sandcastle-` and a Job that collides with the
 next one.
 
-### Secrets this Job expects (#20)
+## Credentials
 
-| Secret | Key | Environment variable |
-| --- | --- | --- |
-| `sandcastle-github-token` | `token` | `GITHUB_TOKEN` |
-| `sandcastle-claude-oauth` | `token` | `CLAUDE_CODE_OAUTH_TOKEN` |
+Two, and no more (§36). Sand Castle knows a secret *name*, a *key* and a *credential type*; it
+never knows a value (§14, §15).
 
-`sandcastle-claude-oauth`/`token` is the name §15 uses verbatim. Both are referenced without
-`optional: true`, so a missing Secret or key stops the Pod starting instead of handing the CLI
-an empty string -- see [Never an empty credential](#never-an-empty-credential).
+| Secret | Key | Environment variable | What it is, and where to get it |
+| --- | --- | --- | --- |
+| `sandcastle-github-token` | `token` | `GITHUB_TOKEN` | A **scoped** GitHub token the run clones with and reads the issue with (§17). GitHub → Settings → Developer settings → Personal access tokens. Give it the one repository the run works in, not the account. Not the Sand Castle server's own credential, and not your everyday token. |
+| `sandcastle-claude-oauth` | `token` | `CLAUDE_CODE_OAUTH_TOKEN` | The OAuth token Claude Code authenticates with (§13, §14), from `claude setup-token`. That command prints a **banner around** the token; the token is the single line inside it, and pasting the whole banner is the mistake that broke Phase 1's first real run. |
+
+`sandcastle-claude-oauth` / `token` is the name §15 uses verbatim. Both are referenced from
+`job.yaml` without `optional: true`, so a missing Secret or key stops the Pod starting instead
+of handing the CLI an empty string -- see
+[Never an empty credential](#never-an-empty-credential).
+
+**The values live in exactly two places: the operator's environment (or their git-ignored
+`images/.env.local`) and the cluster.** Never in this repository, never in a manifest, never in
+a log line, never in a shell history file, and never in a command-line argument.
+
+### Creating them
+
+`create-secrets.sh` reads both credentials from the environment, or from the git-ignored
+`images/.env.local` that `images/agent/scripts/smoke.sh` already uses, in the same `KEY=VALUE`
+form. It takes no credential arguments and never will.
+
+```sh
+export GITHUB_TOKEN=...              # or put both in images/.env.local
+export CLAUDE_CODE_OAUTH_TOKEN=...
+./deploy/kubernetes/scripts/create-secrets.sh
+```
+
+It refuses, before it touches the cluster, if either credential is missing (naming which, and
+nothing else) or malformed. A value with a line break in it is malformed by definition, and it
+is the shape of the failure that cost Phase 1 its first real run: `CLAUDE_CODE_OAUTH_TOKEN`
+held 2055 characters across 28 lines -- the whole banner `claude setup-token` prints. Whitespace
+and control characters are rejected for the same reason. The message names the variable, the
+defect, and the size of what was found, never the value:
+
+```text
+[SECRETS] ERROR: CLAUDE_CODE_OAUTH_TOKEN contains a line break, so it cannot be a credential:
+2055 characters across 28 lines. `claude setup-token` prints a banner around the token; export
+the token alone. (The value is not shown.)
+```
+
+The same rule is applied to `GITHUB_TOKEN`, so the two stay consistent (#7 wants it inside the
+container as well).
+
+An exported value beats `images/.env.local`, which is where this script differs from `smoke.sh`
+deliberately: it writes to a cluster, and a stale line in the file silently overriding what you
+just exported would install yesterday's credential and say nothing about it.
+
+### Confirming them, without printing anything
+
+```sh
+./deploy/kubernetes/scripts/create-secrets.sh --verify
+```
+
+```text
+[SECRETS] sandcastle-github-token: key 'token' present, 40 bytes (value not shown)
+[SECRETS] sandcastle-claude-oauth: key 'token' present, 108 bytes (value not shown)
+```
+
+It asserts the key names -- read with a `go-template` over `.data`, which prints keys and not
+values -- and that the stored value is not empty, whose length it reports so an obviously wrong
+one is obvious. `kubectl get secret -o jsonpath='{.data.token}'` prints the credential itself,
+base64 or not; do not reach for it.
+
+### Rotating them
+
+Re-run the script with the new value in the environment. It replaces rather than fails, so
+rotation and first install are the same command:
+
+```sh
+export CLAUDE_CODE_OAUTH_TOKEN=...   # the new one
+./deploy/kubernetes/scripts/create-secrets.sh
+```
+
+A running Pod keeps the value it started with -- `secretKeyRef` resolves once, at Pod start --
+so a rotation takes effect on the next run, and a run already in flight is unaffected. Revoke
+the old credential at the provider afterwards; deleting it from the cluster does not.
+
+### Why the value never becomes an argument
+
+`kubectl create secret generic --from-literal=token=$TOKEN` puts the credential in `kubectl`'s
+argv, where any user on the machine can read it out of the process table, and in the shell
+history of whoever ran it. That is precisely the defect #2 lost a review round to, with a token
+in `curl`'s `--header`; a reviewer confirmed it live by polling the process table.
+
+So the value goes into a `0600` file inside a `0700` directory that is removed however the
+script exits, `kubectl create --dry-run=client` reads *that file*, and the rendered Secret
+reaches `kubectl apply` on **stdin**. Only the file's path is ever an argument. The
+`--dry-run`-and-apply pipeline is also what makes the script idempotent: `kubectl create` alone
+fails with `AlreadyExists` the second time.
+
+That property is asserted, not asserted-about: `images/agent/bootstrap/test/secrets.bats` runs
+the script against the recording `kubectl` that `helpers.bash` binds on `PATH` at load time --
+so no test can reach a cluster -- and that fake records what reached argv separately from what
+reached stdin. The suite refutes distinct canary values in the argv record, and separately
+*requires* each one in the store the fake builds from what `apply` was piped, because a
+refutation alone would be satisfied by a script that passed no credential at all. One more test
+invokes the same fake with `--from-literal` and requires the canary to appear in the argv
+record, which is what proves the record is not simply empty. Switching the script to
+`--from-literal` fails three of those tests; gutting the fake's argv recording fails the proof
+test.
+
+Those tests live in the image's bats suite rather than beside `validate.sh` because that is
+where the recording-fake machinery and the assertion helpers already are (`installFakeDocker`,
+`installFakeAgentClis`); the suite's own bash-3.2 style guard reaches them there and would not
+reach a second suite. They mount the repository root when run in the container, for which see
+`images/agent/README.md`.
 
 ### Running Codex instead of Claude
 
 Two lines in `job.yaml`, edited together: `AGENT` becomes `codex`, and the
-`CLAUDE_CODE_OAUTH_TOKEN` entry becomes `CODEX_API_KEY` or `CODEX_ACCESS_TOKEN` pointing at
-whatever Secret #20 creates for it. `AGENT` is deliberately not a placeholder for exactly this
+`CLAUDE_CODE_OAUTH_TOKEN` entry becomes `CODEX_API_KEY` or `CODEX_ACCESS_TOKEN`, pointing at a
+Secret of its own -- a third entry in `create-secrets.sh`'s `SECRET_SPECS`, which is the whole
+change that end needs. §36 asks for one agent, so there is no Codex Secret until someone runs
+Codex. `AGENT` is deliberately not a placeholder for exactly this
 reason: an agent and its credential have to change together, and a renderer that let you set
 `AGENT=codex` against the Claude Secret would produce a Job that starts and then cannot
 authenticate.
@@ -248,6 +351,13 @@ rather than in that suite because they are about `deploy/`, not about the image:
 second bats suite would mean a second copy of the suite's bootstrapping and a style guard that
 does not reach it, for assertions that need neither.
 
+`create-secrets.sh` is the exception, and for the same reason rather than against it: what has
+to be checked about it is a *behaviour* -- what it puts in argv, what it refuses -- which needs
+a recording fake and the assertion helpers the bats suite already has, not a `yq` expression
+over a file. So it is `shellcheck`ed by the `manifests` job here and exercised by
+`images/agent/bootstrap/test/secrets.bats` under the `test` job, where a fake `kubectl` bound at
+`helpers.bash` load time means no test can reach a cluster.
+
 `prove-checks.sh` is the other half of the house rule. It copies the manifests, breaks exactly
 one property, runs `validate.sh` against the copy and requires it to fail, once per property,
 and reports which assertion caught each one so that a mutation failing for an unrelated reason
@@ -271,6 +381,14 @@ kubectl apply --dry-run=server -f deploy/kubernetes/serviceaccount.yaml
 ./deploy/kubernetes/scripts/render-job.sh dry-run-0001 octocat/Hello-World 1 |
   kubectl apply --dry-run=server -f -
 ```
+
+`create-secrets.sh` has no dry run, because the thing worth checking about it is what actually
+lands in the cluster. It was confirmed against the k3s cluster with obviously-fake values: run,
+re-run with different values, `--verify` -- two Secrets, one key each, replaced rather than
+duplicated, lengths tracking the value -- and then both Secrets and the namespace deleted. The
+live half of the argv property was confirmed there too, the way #2's leak was: polling the
+process table while the script ran found nothing, while the same poller watching a
+`--from-literal` invocation found the value immediately.
 
 ### Making the check required
 

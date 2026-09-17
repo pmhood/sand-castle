@@ -135,9 +135,14 @@ explicitly — and `style.bats` fails if a bare `[[ ]]` assertion reappears. The
 the quickest way to run the same suite under bash 5:
 
 ```sh
-docker run --rm -v "$PWD/images/agent:/agent" -w /agent \
-  --entrypoint /agent/.bats/bin/bats sandcastle-agent:dev bootstrap/test
+docker run --rm -v "$PWD:/repo" -w /repo/images/agent \
+  --entrypoint /repo/images/agent/.bats/bin/bats sandcastle-agent:dev bootstrap/test
 ```
+
+The whole repository is mounted, not just `images/agent`: `bootstrap/test/secrets.bats`
+exercises `deploy/kubernetes/scripts/create-secrets.sh`, which lives outside it. Mount only
+`images/agent` and its first test fails saying the script is not there, which is deliberate --
+a suite that quietly skipped what it could not find would report safety it never checked.
 
 ## Published image
 

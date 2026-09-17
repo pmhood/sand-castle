@@ -251,8 +251,152 @@ EOF
     export PATH="$bin:$PATH"
 }
 
+# Installs a recording stand-in for kubectl, so no test can reach a cluster -- the one in
+# deploy/kubernetes/scripts/create-secrets.sh sends a credential to, least of all.
+#
+# It records two things apart, because they are what the credential rule is about: everything
+# that reached argv (one argument per line, appended across invocations, which is what
+# /proc/<pid>/cmdline would have shown) and everything that reached stdin. It also keeps a
+# one-Secret-per-name store, so a second run of a script sees the first run's result and the
+# key names and values can be read back the way `kubectl get` reads them.
+#
+# The store is written by `apply` out of what it was piped, never by `create --dry-run`: a fake
+# that recorded the intent instead of the delivery would be satisfied by a script that rendered
+# a Secret and applied nothing.
+installFakeKubectl() {
+    local root bin
+    root=${BATS_TEST_TMPDIR:-${BATS_FILE_TMPDIR-}}
+    [[ -n $root ]] || return 0
+    bin="$root/bin"
+    KUBECTL_RECORD="$root/kubectl-record"
+    mkdir -p "$bin" "$KUBECTL_RECORD/store"
+
+    cat >"$bin/kubectl" <<'EOF'
+#!/usr/bin/env bash
+# Recording stand-in for kubectl. Reaches no cluster; understands only what the Secret scripts
+# ask of it, and fails loudly on anything else rather than pretending to have done it.
+set -euo pipefail
+
+record=$KUBECTL_RECORD
+store="$record/store"
+
+printf '%s\n' "$@" >>"$record/argv"
+printf '%s\n' "$*" >>"$record/commands"
+
+# The flags the scripts pass, pulled out wherever they sit, so the fake does not depend on
+# their order. Everything else is left in "$@" for the verb match below.
+namespace=
+fromFile=
+fromLiteral=
+outputFormat=
+verb=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --namespace) namespace=$2; shift 2 ;;
+        --from-file=*) fromFile=${1#--from-file=}; shift ;;
+        # Supported, and faithfully: the fake must not be the thing that refuses a credential
+        # in argv, or the assertion that refuses it could never be seen to fail.
+        --from-literal=*) fromLiteral=${1#--from-literal=}; shift ;;
+        -o) outputFormat=$2; shift 2 ;;
+        -o*) outputFormat=${1#-o}; shift ;;
+        --dry-run=*) shift ;;
+        -f) shift 2 ;;
+        *) verb+=("$1"); shift ;;
+    esac
+done
+
+fail() {
+    printf 'fake kubectl: %s\n' "$*" >&2
+    exit 1
+}
+
+case "${verb[*]-}" in
+    "get namespace $KUBECTL_FAKE_NAMESPACE")
+        [ "${KUBECTL_FAKE_NAMESPACE_MISSING:-no}" = no ] ||
+            fail "Error from server (NotFound): namespaces \"$KUBECTL_FAKE_NAMESPACE\" not found"
+        printf 'namespace/%s\n' "$KUBECTL_FAKE_NAMESPACE"
+        ;;
+
+    "create secret generic "*)
+        # Renders the Secret the caller asked for, reading the value out of the file named by
+        # --from-file, exactly as the real one does. The value is recorded under the key it
+        # will be stored as, so a test can assert what was handed over as well as how.
+        name=${verb[3]}
+        [ "$outputFormat" = yaml ] || fail "expected -o yaml, got '${outputFormat:-none}'"
+        if [ -n "$fromFile" ]; then
+            key=${fromFile%%=*}
+            path=${fromFile#*=}
+            [ -f "$path" ] || fail "--from-file names no readable file"
+            cp "$path" "$record/from-file.$key"
+            printf '%s\n' "$path" >>"$record/from-file.paths"
+        elif [ -n "$fromLiteral" ]; then
+            key=${fromLiteral%%=*}
+            path="$record/from-literal.$key"
+            printf '%s' "${fromLiteral#*=}" >"$path"
+        else
+            fail "no --from-file and no --from-literal"
+        fi
+        printf 'apiVersion: v1\nkind: Secret\ntype: Opaque\nmetadata:\n  name: %s\n  namespace: %s\ndata:\n  %s: %s\n' \
+            "$name" "$namespace" "$key" "$(base64 <"$path" | tr -d '\n')"
+        ;;
+
+    apply)
+        manifest=$(cat)
+        printf '%s\n' "$manifest" >>"$record/stdin"
+        name=$(printf '%s\n' "$manifest" | sed -n 's/^  name: //p')
+        [ -n "$name" ] || fail "applied manifest has no metadata.name"
+        # One file per key, so a second apply of the same Secret replaces rather than adds --
+        # and so a test can count what a script left behind. Only the entries under `data:`
+        # are read: a key/value shape elsewhere in the manifest is metadata, not a secret.
+        rm -rf "${store:?}/$name"
+        mkdir -p "$store/$name"
+        printf '%s\n' "$manifest" |
+            awk '/^data:/ { inData = 1; next }
+                 /^[^[:space:]]/ { inData = 0 }
+                 inData && NF == 2 { key = $1; sub(/:$/, "", key); print key, $2 }' |
+            while read -r key value; do
+                printf '%s' "$value" | base64 -d >"$store/$name/$key"
+            done
+        printf 'secret/%s configured\n' "$name"
+        ;;
+
+    "get secret "*)
+        name=${verb[2]}
+        [ -d "$store/$name" ] ||
+            fail "Error from server (NotFound): secrets \"$name\" not found"
+        case $outputFormat in
+            # The two shapes create-secrets.sh asks for: the key names, and one decoded value
+            # piped somewhere that counts it. Neither prints a value the caller did not ask
+            # for, which is the property being tested, so the fake does not invent a third.
+            go-template=*"range"*)
+                for key in "$store/$name"/*; do
+                    printf '%s ' "$(basename "$key")"
+                done
+                ;;
+            go-template=*base64decode*)
+                key=$(printf '%s' "$outputFormat" | sed -n 's/.*index \.data "\([^"]*\)".*/\1/p')
+                [ -f "$store/$name/$key" ] || fail "no key '$key' in secret $name"
+                cat "$store/$name/$key"
+                ;;
+            *) fail "unsupported output format '${outputFormat:-none}'" ;;
+        esac
+        ;;
+
+    *) fail "unsupported invocation: ${verb[*]-}" ;;
+esac
+EOF
+    chmod +x "$bin/kubectl"
+
+    export KUBECTL_RECORD="$KUBECTL_RECORD"
+    export KUBECTL_FAKE_NAMESPACE=sandcastle-agents
+    export KUBECTL_FAKE_NAMESPACE_MISSING=no
+    export PATH="$bin:$PATH"
+}
+
 # Runs as every test file loads this one, before its setup_file, its setup and any test body,
 # so the agent CLIs a run can reach are the stand-ins and not the real thing (§13).
-# Also install fake docker to prevent smoke.sh tests from running real containers (§14).
+# Also install fake docker to prevent smoke.sh tests from running real containers (§14), and
+# fake kubectl so no test can reach a cluster with a credential (§14, §15).
 installFakeAgentClis
 installFakeDocker
+installFakeKubectl

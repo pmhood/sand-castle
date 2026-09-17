@@ -1,9 +1,13 @@
 name: Agent image
 
+# `build`, `test` and `shellcheck` are required status checks on the protected `main`, so they
+# must report on every pull request: GitHub treats a required check that never runs as still
+# pending and blocks the merge, which is what a `paths:` filter on pull_request would cause for
+# a change outside images/agent. The push trigger keeps its filter, because the only thing
+# downstream of it is `publish`, which should republish the image when the image changes and
+# not when something else does.
 on:
   pull_request:
-    paths:
-      - "images/agent/**"
   push:
     branches:
       - main

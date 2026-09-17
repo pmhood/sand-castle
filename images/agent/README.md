@@ -177,8 +177,10 @@ Until that step is done the package stays private and the commands above need a
 
 ### Getting the current digest
 
-Kubernetes Job manifests should reference the image by digest, not by a tag (§20). Prefer the
-`sha-<short-sha>` tag over `latest` when reading that digest: `latest` moves to whatever the
+Kubernetes Job manifests should reference the image by digest, not by a tag (§20); the digest
+in use is the `image:` line of `deploy/kubernetes/job.yaml`, and that directory's README says
+how to update it. Prefer the `sha-<short-sha>` tag over `latest` when reading that digest:
+`latest` moves to whatever the
 newest merge to `main` published, and once it moves, the digest it used to point at becomes
 untagged -- which GHCR's untagged-image retention can reap. `sha-<short-sha>` keeps every
 published digest permanently referenceable and traceable back to the commit that produced it,

@@ -1,0 +1,48 @@
+name: Kubernetes manifests
+
+# No `paths:` filter on pull_request, deliberately. `main` is protected by required status
+# checks, and GitHub blocks a pull request on a required check that never reports -- so a
+# filtered-out job leaves the pull request waiting forever rather than passing. A check that is
+# meant to be required has to run on every pull request. The push trigger is filtered, because
+# nothing downstream of it depends on this job.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy/kubernetes/**"
+      - ".github/workflows/kubernetes-manifests.yml"
+
+jobs:
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned versions, for the same reason the Dockerfile pins its CLIs: a validation tool
+      # that moves on its own turns an unrelated pull request red, or quietly stops checking.
+      - name: Install kubeconform and yq
+        env:
+          KUBECONFORM_VERSION: v0.7.0
+          YQ_VERSION: v4.44.3
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/$KUBECONFORM_VERSION/kubeconform-linux-amd64.tar.gz" |
+            sudo tar xz -C /usr/local/bin kubeconform
+          sudo curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/$YQ_VERSION/yq_linux_amd64"
+          sudo chmod +x /usr/local/bin/yq
+          kubeconform -v
+          yq --version
+
+      - name: Run shellcheck
+        run: shellcheck deploy/kubernetes/scripts/*.sh
+
+      - name: Validate the manifests
+        run: ./deploy/kubernetes/scripts/validate.sh
+
+      # A green validation proves nothing unless its assertions bite; #8 is why this is a step
+      # and not a one-time manual act.
+      - name: Prove each assertion bites
+        run: ./deploy/kubernetes/scripts/prove-checks.sh

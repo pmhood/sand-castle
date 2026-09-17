@@ -1,0 +1,20 @@
+# The namespace every agent run lives in (docs/ARCHITECTURE.md §21).
+#
+# One namespace, not two: §21 also names `sandcastle-system` for the server, the UI and
+# Postgres, but §36 is explicit that Phase 2 has no server. A namespace with nothing in it is
+# not a boundary, so `sandcastle-system` arrives with the workload it is meant to separate
+# (Phase 3), not before. See README.md.
+#
+# The Pod Security Admission labels make §50's posture the namespace's rule rather than one
+# Job's good intentions: `restricted` rejects a Pod that is not runAsNonRoot, that allows
+# privilege escalation, that keeps any capability, or that does not set a seccomp profile --
+# exactly the set job.yaml sets. A future manifest that quietly drops one is rejected at
+# admission instead of running with it missing.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandcastle-agents
+  labels:
+    app: sandcastle
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

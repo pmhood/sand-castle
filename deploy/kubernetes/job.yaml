@@ -1,0 +1,164 @@
+# One agent run, as a Kubernetes Job (docs/ARCHITECTURE.md §19, §20, §23, §24, §47, §50).
+#
+# A Job rather than a bare Pod because a run is finite: a Job gives explicit completion, retry
+# control, TTL cleanup and an exit status, and a Pod gives none of them (§19).
+#
+# This file is a template with three `${...}` placeholders -- RUN_ID, GITHUB_REPOSITORY and
+# GITHUB_ISSUE_NUMBER. Render it with `scripts/render-job.sh`, which validates each value and
+# refuses to substitute an empty one; applied unrendered it asks for a Job named
+# `sandcastle-${RUN_ID}`, which the API server rejects. Phase 3's launcher (#21) substitutes
+# the same three. Everything else is a deliberate constant, so a run differs from a run only in
+# which repository and issue it is pointed at.
+#
+# Every placeholder is quoted, without exception, because a substituted value is text and YAML
+# would otherwise read some of it as something else: run IDs like `123`, `0755` or `true` are
+# all valid DNS-1123 labels, and unquoted they render as an integer or a boolean, which the API
+# server rejects for a label value and for an env value. The rule is uniform rather than
+# case-by-case so that a fourth placeholder cannot be added on the wrong side of it.
+#
+# `AGENT` is a constant here, not a placeholder, because the agent and its credential have to
+# change together: rendering AGENT=codex against the Claude OAuth secret below would produce a
+# Job that starts and then fails to authenticate. README.md has the two-line edit for Codex.
+apiVersion: batch/v1
+kind: Job
+
+metadata:
+  name: "sandcastle-${RUN_ID}"
+  namespace: sandcastle-agents
+  labels:
+    app: sandcastle
+    sandcastle.run: "${RUN_ID}"
+
+spec:
+  # An agent run is not idempotent -- it clones, branches, edits, and in later phases pushes
+  # and comments. A silent retry would do all of that twice (§20).
+  backoffLimit: 0
+
+  # §23's 30-minute run timeout. Exceeding it fails the Job and removes the Pod.
+  activeDeadlineSeconds: 1800
+
+  # §47 wants a successful Job kept 1 hour and a failed one 24; a Job has one TTL, so this is
+  # the longer of the two. In Phase 2 the Pod is the only record a run leaves -- there is no
+  # server, no database and no log collection (§48 is Phase 3 onward) -- and reaping a failure
+  # after an hour destroys the only evidence of it, while keeping a success for a day costs one
+  # terminated Pod. Split the pair once something outside the cluster is keeping the logs.
+  ttlSecondsAfterFinished: 86400
+
+  template:
+    metadata:
+      labels:
+        app: sandcastle
+        sandcastle.run: "${RUN_ID}"
+
+    spec:
+      # §19: the run either completes or fails. `OnFailure`, the only alternative a Job allows,
+      # restarts the container in place -- which re-runs the bootstrap over a workspace that
+      # already has a checkout in it, a directory the bootstrap expects to be empty.
+      restartPolicy: Never
+
+      # §50: a dedicated identity with no Kubernetes API access. Set here as well as on the
+      # ServiceAccount because this is the field the kubelet actually consults -- an edit to
+      # serviceaccount.yaml alone cannot quietly put a token back in the container.
+      serviceAccountName: sandcastle-agent
+      automountServiceAccountToken: false
+
+      # §50, the half of the posture that is Pod-wide. The image already runs as its uid/gid
+      # 1000 `node` user; saying so here means the Pod's identity does not depend on the
+      # Dockerfile's `USER` line staying what it is, and `runAsNonRoot` refuses to start the
+      # container at all if it ever resolves to uid 0.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: agent
+
+          # §20: an immutable digest, never a floating tag. `:latest` moves whenever main
+          # merges, so a tag would make "the same Job" mean a different image tomorrow.
+          # images/agent/README.md ("Getting the current digest") documents how to read the
+          # digest for a given commit and how to update this line.
+          image: ghcr.io/pmhood/sandcastle-agent@sha256:de6e6b925d00f798f22d63015ceeaf90b703ac6cb28396ba709917fc97cf1479
+
+          # §50, the half that only exists per container.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+          # Run context: plain values, no credential among them (§15). Every one of these is
+          # required by the bootstrap's validateEnvironment, which dies naming any that is
+          # missing rather than guessing.
+          env:
+            - name: SANDCASTLE_RUN_ID
+              value: "${RUN_ID}"
+
+            - name: GITHUB_REPOSITORY
+              value: "${GITHUB_REPOSITORY}"
+
+            - name: GITHUB_ISSUE_NUMBER
+              value: "${GITHUB_ISSUE_NUMBER}"
+
+            - name: AGENT
+              value: claude
+
+            # Credentials: secretKeyRef only, never a literal value, and never `optional: true`
+            # (§15, §52). An optional reference to a key that does not exist materialises the
+            # variable as an empty string, and #14 is what that costs: an empty
+            # CLAUDE_CONFIG_DIR made the CLI resolve its config directory relative to the
+            # working directory and write into the checkout the agent was editing. Required
+            # references fail the Pod instead, loudly, before the agent starts. The Secrets
+            # themselves are #20's; these names are the contract between the two.
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sandcastle-github-token
+                  key: token
+
+            # Claude Code reads this one straight from the environment. Codex does not have an
+            # equivalent: `OPENAI_API_KEY` alone does not authenticate Codex 0.154.0 -- it
+            # sends no credential at all (#3) -- so the Codex swap in README.md names
+            # CODEX_API_KEY or CODEX_ACCESS_TOKEN instead.
+            - name: CLAUDE_CODE_OAUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sandcastle-claude-oauth
+                  key: token
+
+          # §23's initial defaults.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+
+          # The three paths that must stay writable under readOnlyRootFilesystem. README.md
+          # ("Writable paths") records how each was determined and what breaks without it.
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+
+            - name: home
+              mountPath: /home/node
+
+            - name: tmp
+              mountPath: /tmp
+
+      # §24: the workspace does not need to survive the run, so emptyDir, not a volume claim.
+      # The other two are emptyDir for the same reason -- they exist to make specific paths
+      # writable for the life of one Pod, and everything worth keeping leaves via git.
+      volumes:
+        - name: workspace
+          emptyDir: {}
+
+        - name: home
+          emptyDir: {}
+
+        - name: tmp
+          emptyDir: {}

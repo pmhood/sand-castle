@@ -206,6 +206,28 @@ no `envFrom`, one document per manifest, one Pod per run (`parallelism`/`complet
 manifest set that is exactly the three files named above -- so a fourth manifest is a decision
 someone has to make here rather than a file nothing reads.
 
+A security context is also defined by what is *absent* from it, and an enumeration of dangerous
+fields is out of date the next time Kubernetes adds one. Three of them are asserted by name,
+because they are the ones a reader auditing this list will look for and because a named
+assertion survives a later relaxation of the pins below: no container of any kind is
+`privileged`, no capability is added back after `drop: [ALL]`, and the Pod shares none of the
+host's namespaces (`hostNetwork`, `hostPID`, `hostIPC`). Everything else is covered by pinning
+key sets -- the container's security context, the Pod's security context, the Pod spec, the Job
+spec, and the Pod template's metadata are each exactly the fields they are, and anything else
+fails until someone decides it belongs. That one line covers `procMount: Unmasked`, an
+`appArmorProfile` or `seLinuxOptions` override, a container-level `runAsUser: 0` quietly
+overriding the Pod's 1000, unsafe `sysctls`, a `nodeName` that skips the scheduler, a
+`podFailurePolicy` that would make `backoffLimit: 0` mean nothing, and the deprecated-but-still
+honoured `container.apparmor.security.beta.kubernetes.io/agent: unconfined` annotation, which
+is an AppArmor override that never touches a security context at all.
+
+`privileged` is worth the paragraph it gets in `validate.sh`. Before it was asserted, the
+posture held only by coincidence: `privileged: true` alongside `allowPrivilegeEscalation:
+false` is refused by the API server's own contradiction rule (*"cannot set
+`allowPrivilegeEscalation` to false and `privileged` to true"*), and `privileged: true` with
+that field removed is **accepted** by the API server and caught only by the separate assertion
+on the field that was removed. Two other rules lining up is not the same as being checked.
+
 Three details are load-bearing. `-strict` is what catches a *misspelled* field:
 `readOnlyRootFileSystem` (capital S) is silently ignored by the API server, and by a non-strict
 check, and would leave the root filesystem writable while looking correct. The schema step

@@ -254,6 +254,61 @@ checkSecurityContext() {
         "true" "$(read_ "$job" "$container.securityContext.readOnlyRootFilesystem")"
     check "every capability is dropped (§50)" \
         "ALL" "$(read_ "$job" "$container.securityContext.capabilities.drop | join(\",\")")"
+    # `drop: [ALL]` says nothing about what was added back afterwards, and `add` is the half
+    # that hands the agent CAP_SYS_ADMIN.
+    check "no capability is added back (§50)" \
+        "0" "$(read_ "$job" "($container.securityContext.capabilities.add // []) | length")"
+    # The single most consequential field in a container's security context, and the reason to
+    # assert it by name rather than leave it to the shape pin below: today a `privileged: true`
+    # alongside `allowPrivilegeEscalation: false` is refused by the API server's own
+    # contradiction rule, and a `privileged: true` without it is caught by the assertion above
+    # -- so the posture holds by coincidence of two other rules lining up, which is not the
+    # same as being checked. Asserted across every kind of container, so the rule survives if
+    # the Pod ever grows an init container.
+    check "no container of any kind is privileged (§50)" \
+        "false" \
+        "$(read_ "$job" \
+            "[(($pod.containers // []) + ($pod.initContainers // []) + ($pod.ephemeralContainers // []))[] | .securityContext.privileged // false] | unique | join(\" \")")"
+    # Sharing any of the host's namespaces undoes the boundary the rest of this is defending:
+    # hostPID shows the agent every process on the node, and hostNetwork gives it the node's
+    # network, including whatever a future NetworkPolicy (§51) would otherwise constrain.
+    check "the Pod shares none of the host's namespaces (§50)" \
+        "false false false" \
+        "$(read_ "$job" \
+            "[($pod.hostNetwork // false), ($pod.hostPID // false), ($pod.hostIPC // false)] | join(\" \")")"
+}
+
+# The assertions above name the fields that must be set, and a security context is also defined
+# by what is absent from it: `privileged`, `procMount: Unmasked`, an `appArmorProfile` or
+# `seLinuxOptions` override, a container-level `runAsUser: 0` quietly overriding the Pod's 1000,
+# unsafe `sysctls`, a `nodeName` that skips the scheduler, an AppArmor annotation on the Pod
+# template, a `podFailurePolicy` that makes backoffLimit: 0 mean nothing. Enumerating those is a
+# list that is out of date the next time Kubernetes adds a field, so pin the key sets instead:
+# anything not named here fails until someone decides it should be there. That is the same
+# reasoning as the manifest set and the two environment lists.
+#
+# These run last, so that a field with an assertion of its own is reported by that assertion
+# rather than by this one.
+checkNothingElseIsSet() {
+    local job=$1 pod=".spec.template.spec"
+
+    check "the container's security context is exactly these fields (§50)" \
+        "allowPrivilegeEscalation capabilities readOnlyRootFilesystem" \
+        "$(read_ "$job" "[$pod.containers[0].securityContext | keys | .[]] | sort | join(\" \")")"
+    check "the Pod's security context is exactly these fields (§50)" \
+        "runAsGroup runAsNonRoot runAsUser seccompProfile" \
+        "$(read_ "$job" "[$pod.securityContext | keys | .[]] | sort | join(\" \")")"
+    check "the Pod spec is exactly these fields (§50)" \
+        "automountServiceAccountToken containers restartPolicy securityContext serviceAccountName volumes" \
+        "$(read_ "$job" "[$pod | keys | .[]] | sort | join(\" \")")"
+    check "the Job spec is exactly these fields (§19, §23, §47)" \
+        "activeDeadlineSeconds backoffLimit template ttlSecondsAfterFinished" \
+        "$(read_ "$job" '[.spec | keys | .[]] | sort | join(" ")')"
+    # Labels and nothing else: the deprecated-but-still-honoured
+    # `container.apparmor.security.beta.kubernetes.io/<container>: unconfined` annotation is an
+    # AppArmor override that never touches a securityContext.
+    check "the Pod template's metadata is exactly these fields (§50)" \
+        "labels" "$(read_ "$job" '[.spec.template.metadata | keys | .[]] | sort | join(" ")')"
 }
 
 checkResources() {
@@ -367,6 +422,7 @@ main() {
     checkWritablePaths "$job"
     checkCredentialWiring "$job"
     checkScalarTypes "$numericJob"
+    checkNothingElseIsSet "$job"
 
     log "$PASSED assertions passed, $FAILED failed"
     [ "$FAILED" -eq 0 ] || exit 1

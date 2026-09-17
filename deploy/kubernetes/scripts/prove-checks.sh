@@ -94,6 +94,38 @@ readonly MUTATIONS=(
     'every capability is dropped'
 
     job.yaml
+    '.spec.template.spec.containers[0].securityContext.capabilities.add = ["SYS_ADMIN"]'
+    'no capability is added back after drop: [ALL]'
+
+    job.yaml
+    '.spec.template.spec.containers[0].securityContext.privileged = true'
+    'no container is privileged'
+
+    job.yaml
+    '.spec.template.spec.hostPID = true'
+    'the Pod shares none of the host namespaces'
+
+    job.yaml
+    '.spec.template.spec.containers[0].securityContext.runAsUser = 0'
+    'nothing else is set in the container security context, including an override of the Pod uid'
+
+    job.yaml
+    '.spec.template.spec.securityContext.seLinuxOptions = {"type": "spc_t"}'
+    'nothing else is set in the Pod security context'
+
+    job.yaml
+    '.spec.template.spec.nodeName = "red"'
+    'nothing else is set in the Pod spec, including a way around the scheduler'
+
+    job.yaml
+    '.spec.suspend = true'
+    'nothing else is set in the Job spec'
+
+    job.yaml
+    '.spec.template.metadata.annotations = {"container.apparmor.security.beta.kubernetes.io/agent": "unconfined"}'
+    'nothing else is set in the Pod template metadata, including an AppArmor override'
+
+    job.yaml
     '.spec.template.spec.containers[0].securityContext.readOnlyRootFileSystem = true'
     'a misspelled security field is rejected rather than silently ignored'
 

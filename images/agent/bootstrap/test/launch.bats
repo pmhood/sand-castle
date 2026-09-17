@@ -8,11 +8,18 @@
 # broke, because a Pod that never starts looks identical whether the image is unpullable, a
 # Secret key is misspelled, the node is the wrong architecture, or admission refused the Pod.
 #
-# The strings the launcher matches on are not invented here. Every fixture below was recorded
-# from a real k3s cluster by inducing that failure with obviously fake values -- a zeroed digest,
-# an arm64-only image, a misspelled `key:`, a 1000-CPU request, a one-second deadline, a
-# `runAsNonRoot: false` -- and reading back what Kubernetes said. helpers.bash binds the
-# recording `kubectl` at load time, so nothing here can reach a cluster.
+# The strings the launcher matches on are not invented here. Almost every fixture below was
+# recorded from a real k3s cluster by inducing that failure with obviously fake values -- a
+# zeroed digest, an arm64-only image, a misspelled `key:`, a 1000-CPU request, a one-second
+# deadline, a `runAsNonRoot: false` -- and reading back what Kubernetes said. helpers.bash binds
+# the recording `kubectl` at load time, so nothing here can reach a cluster.
+#
+# "Almost", and the exceptions are marked, because a fixture that claims to be a recording and
+# is not is the kind of thing the next person builds on. Three kinds appear below and each says
+# which it is: verbatim, recorded-and-transposed (the cluster's exact wording, with the probe's
+# object names replaced by this suite's run ID and the real image and Secret names), and
+# constructed (the field shape is the cluster's, the value was never read back, because that
+# failure could not be induced here).
 
 bats_require_minimum_version 1.5.0
 
@@ -34,31 +41,57 @@ readonly POD_NAME="$JOB_NAME-abcde"
 
 # What `kubectl get pod` reports, in the order and with the separator launch-run.sh asks for:
 # phase|status.reason|waiting.reason|running.startedAt|terminated.reason|terminated.exitCode|message
+#
+# Verbatim.
 readonly FACTS_PULLING='Pending||ContainerCreating||||'
-readonly FACTS_RUNNING='Running|||2026-09-17T02:14:41Z|||'
-readonly FACTS_SUCCEEDED='Succeeded||||Completed|0|'
 readonly FACTS_AGENT_FAILED='Failed||||Error|3|'
 readonly FACTS_OOM='Failed||||OOMKilled|137|'
 readonly FACTS_START_ERROR='Failed||||StartError|128|failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: exec: "/no/such/binary": stat /no/such/binary: no such file or directory'
-readonly FACTS_EVICTED='Failed|Evicted|||||The node was low on resource: ephemeral-storage.'
 readonly FACTS_UNSCHEDULED='Pending||||||'
 
+# Constructed. A container that is running reports `running.startedAt` and nothing else, but the
+# timestamp is a plausible one rather than a read-back value.
+readonly FACTS_RUNNING='Running|||2026-09-17T02:14:41Z|||'
+# Constructed: no run on this cluster has succeeded, because succeeding needs a real credential.
+# That run is the repo owner's acceptance test (deploy/kubernetes/README.md).
+readonly FACTS_SUCCEEDED='Succeeded||||Completed|0|'
+# Constructed: eviction needs a node under real resource pressure, which was not worth producing
+# on someone's cluster. `status.reason` and `status.message` are where the kubelet puts it.
+readonly FACTS_EVICTED='Failed|Evicted|||||The node was low on resource: ephemeral-storage.'
+
+# Verbatim.
 readonly FACTS_IMAGE_MISSING='Pending||ErrImagePull||||rpc error: code = NotFound desc = failed to pull and unpack image "ghcr.io/pmhood/sandcastle-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000": failed to resolve reference "ghcr.io/pmhood/sandcastle-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000": ghcr.io/pmhood/sandcastle-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000: not found'
-# The architecture mismatch also ends in "not found", which is why its own test exists.
+# Verbatim. The architecture mismatch also ends in "not found", which is why its own test exists.
 readonly FACTS_WRONG_ARCH='Pending||ErrImagePull||||rpc error: code = NotFound desc = failed to pull and unpack image "docker.io/arm64v8/alpine:3.20": no match for platform in manifest: not found'
+# Recorded and transposed: the probe pulled ghcr.io/pmhood/sandcastle-no-such-package, and the
+# package name is replaced throughout -- including inside the token URL's scope -- by the one
+# whose privacy would actually cause this (#18's GHCR package is meant to be public).
 readonly FACTS_REGISTRY_DENIED='Pending||ErrImagePull||||failed to pull and unpack image "ghcr.io/pmhood/sandcastle-agent:latest": failed to resolve reference "ghcr.io/pmhood/sandcastle-agent:latest": failed to authorize: failed to fetch anonymous token: unexpected status from GET request to https://ghcr.io/token?scope=repository%3Apmhood%2Fsandcastle-agent%3Apull&service=ghcr.io: 403 Forbidden'
+# Verbatim: this one was induced through the launcher itself, against the real Secret.
 readonly FACTS_BAD_SECRET_KEY='Pending||CreateContainerConfigError||||couldn'"'"'t find key tokenn in Secret sandcastle-agents/sandcastle-github-token'
+# Recorded and transposed: the probe deleted sandcastle-github-token; the other Secret is named
+# here so the two credentials-layer fixtures are not both about the same one.
 readonly FACTS_SECRET_MISSING='Pending||CreateContainerConfigError||||secret "sandcastle-claude-oauth" not found'
 
+# `{PodScheduled.reason}|{PodScheduled.message}`. Both verbatim -- including the scheduled case,
+# which carries *no* reason and no message: the condition is `status: "True"` and nothing else,
+# so the whole answer is the separator. It was `True|` here until a review read the live
+# condition; both are `!= Unschedulable` so nothing behaved differently, which is exactly why a
+# wrong fixture survives.
 readonly SCHEDULING_UNSCHEDULABLE='Unschedulable|0/2 nodes are available: 2 Insufficient cpu. no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.'
-readonly SCHEDULING_OK='True|'
+readonly SCHEDULING_OK='|'
 
+# Verbatim. A Job reaches FailureTarget first and Failed a moment later, with the same reason.
 readonly CONDITIONS_DEADLINE='FailureTarget DeadlineExceeded Job was active longer than specified deadline
 Failed DeadlineExceeded Job was active longer than specified deadline'
 readonly CONDITIONS_BACKOFF='Failed BackoffLimitExceeded Job has reached the specified backoff limit'
 
+# Recorded and transposed: the probes' Pod names become this suite's, and the probe's
+# `nonexistent-sa` becomes the real ServiceAccount. EVENT_PSA keeps two of the five violations
+# the cluster listed, because the launcher matches the prefix and the rest is repetition.
 readonly EVENT_PSA='Error creating: pods "sandcastle-run-test-0001-x9k2p" is forbidden: violates PodSecurity "restricted:latest": privileged (container "agent" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "agent" must set securityContext.allowPrivilegeEscalation=false)'
 readonly EVENT_NO_SERVICE_ACCOUNT='Error creating: pods "sandcastle-run-test-0001-" is forbidden: error looking up service account sandcastle-agents/sandcastle-agent: serviceaccount "sandcastle-agent" not found'
+# Verbatim, from `kubectl apply`'s stderr.
 readonly WARNING_PSA='Warning: would violate PodSecurity "restricted:latest": runAsNonRoot != true (pod must not set securityContext.runAsNonRoot=false)'
 
 setup() {

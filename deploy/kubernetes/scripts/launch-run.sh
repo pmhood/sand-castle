@@ -40,9 +40,12 @@ readonly SERVICE_ACCOUNT="sandcastle-agent"
 readonly EXIT_USAGE=64    # EX_USAGE: the arguments are wrong
 readonly EXIT_CLUSTER=69  # EX_UNAVAILABLE: the run never ran, or the cluster ended it
 
-# How long to wait for a container to start before giving up and saying why. An image pull on a
-# cold node is the slow case; scheduling that will never succeed is the case that has to time
-# out rather than be guessed at.
+# How long to wait before giving up and saying why. It bounds *each* of the two waits that
+# precede the logs -- the Job producing a Pod, and that Pod's container starting -- so a run that
+# stalls in both spends up to twice it here. One number for both, because neither is a deadline
+# on the run itself: that is activeDeadlineSeconds' job (§23). An image pull on a cold node is
+# the slow case; scheduling that will never succeed is the case that has to time out rather than
+# be guessed at.
 readonly START_TIMEOUT="${SANDCASTLE_START_TIMEOUT:-300}"
 # How long to wait after the logs end for the Pod's exit status to be reported.
 readonly FINISH_TIMEOUT="${SANDCASTLE_FINISH_TIMEOUT:-60}"
@@ -129,12 +132,19 @@ reportWhereTheRunIs() {
 
 # The environment takes precedence over the arguments, as in render-job.sh and smoke.sh.
 parseArgs() {
-    case ${1-} in
-        --help | -h)
-            usage
-            exit 0
-            ;;
-    esac
+    local arg
+
+    # Wherever it appears, not only first: `launch-run.sh owner/repo --help` is someone asking
+    # what the third argument is, and answering it by launching a run called `--help` would be a
+    # surprising way to say so.
+    for arg in "$@"; do
+        case $arg in
+            --help | -h)
+                usage
+                exit 0
+                ;;
+        esac
+    done
 
     GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-${1-}}
     GITHUB_ISSUE_NUMBER=${GITHUB_ISSUE_NUMBER:-${2-}}
@@ -298,6 +308,15 @@ jobConditions() {
 
 # The Job controller reports a Pod it could not create here and nowhere else: there is no Pod
 # to carry the status, and the Job's own conditions stay empty while it retries forever.
+#
+# `{.items[-1:]}` -- the last event, because the controller retries and logs the identical
+# refusal every time, and `{.items[*]}` would hand the operator the same sentence N times on one
+# line. This is the one place the rule at podName above is not followed, and the difference is
+# what an empty answer *means*. There, empty means "the Pod is gone" and a jsonpath error
+# silently producing it would be a misreading, so the query is written not to be able to error.
+# Here, empty means "no FailedCreate event", and that is the correct reading whether it came from
+# an empty list, from the error a slice of one raises, or from a kubectl that could not read
+# events at all: no such event, keep waiting. Nothing downstream can mistake it for a refusal.
 jobCreateFailure() {
     kubectl --namespace "$NAMESPACE" get events \
         --field-selector "involvedObject.kind=Job,involvedObject.name=$JOB_NAME,reason=FailedCreate" \

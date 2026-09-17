@@ -58,9 +58,16 @@ Its exit status is the run's:
 
 The message is always the authority on which layer failed; the code is for whatever wraps the
 script. Three environment variables tune the waiting, and exist because a cold image pull and a
-hung scheduler need different patience: `SANDCASTLE_START_TIMEOUT` (default 300s to get a
-container started), `SANDCASTLE_FINISH_TIMEOUT` (60s for the exit status to appear after the
-logs end) and `SANDCASTLE_POLL_INTERVAL` (2s).
+hung scheduler need different patience:
+
+- `SANDCASTLE_START_TIMEOUT` (default `300`) bounds **each** of the two waits before the logs
+  start -- the Job producing a Pod, and that Pod's container starting -- so a run that stalls in
+  both spends up to twice it before the launcher gives up. They are separate waits because they
+  fail for different reasons and get different messages, and one number is enough for both:
+  neither is a deadline on the run, which is `activeDeadlineSeconds`' job (§23).
+- `SANDCASTLE_FINISH_TIMEOUT` (default `60`) bounds the wait after the logs end for the Pod's
+  exit status to appear.
+- `SANDCASTLE_POLL_INTERVAL` (default `2`) is how often each of those three asks.
 
 ### By hand, without the launcher
 

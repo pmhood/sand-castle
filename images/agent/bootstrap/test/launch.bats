@@ -79,6 +79,10 @@ readonly FACTS_SECRET_MISSING='Pending||CreateContainerConfigError||||secret "sa
 # condition; both are `!= Unschedulable` so nothing behaved differently, which is exactly why a
 # wrong fixture survives.
 readonly SCHEDULING_UNSCHEDULABLE='Unschedulable|0/2 nodes are available: 2 Insufficient cpu. no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling.'
+# Verbatim, recorded by applying a rendered Job to the cluster with neither node labelled: this
+# is what job.yaml's capability selector (#30) looks like from the scheduler, and the sentence
+# is the same one a taint or a mislabelled node would produce. Nothing in it names the label.
+readonly SCHEDULING_NO_CAPABLE_NODE="Unschedulable|0/2 nodes are available: 2 node(s) didn't match Pod's node affinity/selector. no new claims to deallocate, preemption: 0/2 nodes are available: 2 Preemption is not helpful for scheduling."
 readonly SCHEDULING_OK='|'
 
 # Verbatim. A Job reaches FailureTarget first and Failed a moment later, with the same reason.
@@ -108,6 +112,15 @@ setup() {
     export RUN_ID
     STATE="$KUBECTL_RECORD/state"
     seedSecrets
+    seedCapableNode
+}
+
+# A cluster with one node that can run job.yaml's image, which is what every test below except
+# the capability ones assumes: job.yaml schedules onto nothing else (#30), and the launcher
+# refuses to apply a Job no node can take. The image is read from the manifest rather than
+# written out here, so the two cannot drift.
+seedCapableNode() {
+    state capableNodes "red|$(awk '$1 == "image:" { print $2; exit }' "$JOB_MANIFEST")"
 }
 
 # Puts the two Secrets in the fake cluster the way an operator does, then forgets that it
@@ -256,6 +269,69 @@ appliedManifest() {
     [ ! -f "$STATE/applied-job" ]
 }
 
+# #30: job.yaml schedules onto a node only if a probe measured that the agent binary runs there.
+# On a cluster nobody has probed that is every node, so the run would sit Pending until the
+# start timeout reading "didn't match Pod's node affinity/selector" -- true, and no help.
+@test "a cluster where no node has been probed is refused before a Job is applied" {
+    state capableNodes ''
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 69 ]
+    assertLineContains "$output" 'FAILED at the capability layer' 'sandcastle.dev/agent-capable=true'
+    assertContains "$output" 'probe-nodes.sh'
+    [ ! -f "$STATE/applied-job" ]
+}
+
+# The half a nodeSelector cannot state. A label records that one *image* ran on that node, and
+# job.yaml's digest moves; the selector matches the label, not the reason for it.
+@test "a node measured against another image is refused, and named" {
+    state capableNodes 'red|ghcr.io/pmhood/sandcastle-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000'
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 69 ]
+    assertLineContains "$output" 'FAILED at the capability layer' ': red'
+    assertContains "$output" 'sandcastle.dev/agent-capable-image' 'probe-nodes.sh'
+    [ ! -f "$STATE/applied-job" ]
+}
+
+# A label with nothing recorded beside it is what a hand-applied one looks like -- an operator's
+# claim that no probe stands behind, which is the thing #30 rejected in favour of a measurement.
+# It is refused for the same reason a stale one is: nobody knows what it is about.
+@test "a capability label with no recorded image is refused like a stale one" {
+    state capableNodes 'red|'
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 69 ]
+    assertLineContains "$output" 'FAILED at the capability layer' ': red'
+    [ ! -f "$STATE/applied-job" ]
+}
+
+# Every candidate node has to agree, not merely one of them: the scheduler chooses among all the
+# nodes the selector matches, so a cluster where one is current and one is stale is the coin flip
+# #30 is about, with an extra step.
+@test "one current node does not excuse a stale one" {
+    state capableNodes "red|$(awk '$1 == "image:" { print $2; exit }' "$JOB_MANIFEST")
+nova|ghcr.io/pmhood/sandcastle-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 69 ]
+    assertLineContains "$output" 'FAILED at the capability layer' ': nova'
+    [ ! -f "$STATE/applied-job" ]
+}
+
+# Listing nodes is cluster-scoped and everything else the launcher does is not, so a kubeconfig
+# that may not look is absence of evidence rather than evidence of trouble: say so and carry on,
+# leaving the scheduler to enforce the selector it always did.
+@test "a node list this kubeconfig may not read is a warning, not a refusal" {
+    export KUBECTL_FAKE_NODES_UNREADABLE=yes
+    givenPod "$FACTS_SUCCEEDED"
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 0 ]
+    assertLineContains "$output" 'Cannot read the cluster' 'sandcastle.dev/agent-capable'
+    refuteContains "$output" 'FAILED at the capability layer'
+}
+
 @test "a run ID already in the cluster is refused rather than applied over" {
     printf 'yes' >"$STATE/job-exists"
     runLaunch octo/demo 7
@@ -333,6 +409,33 @@ appliedManifest() {
     assertLineContains "$output" 'not scheduled yet' 'Insufficient cpu'
     assertLineContains "$output" 'FAILED at the scheduling layer'
     assertContains "$output" 'Insufficient cpu'
+}
+
+# The preflight above cannot see every way this happens -- a label removed while the run was
+# being applied, a node that went away -- so the scheduler's own refusal has to name the
+# capability label too. The message it quotes is the same sentence for a taint and for a
+# mislabelled node, and an operator who reads only it learns nothing to do.
+@test "a Pod no node matches names the capability label and the probe, not just Pending" {
+    givenPod "$FACTS_UNSCHEDULED" "$SCHEDULING_NO_CAPABLE_NODE"
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 69 ]
+    assertLineContains "$output" 'not scheduled yet' "didn't match Pod's node affinity/selector"
+    assertLineContains "$output" 'sandcastle.dev/agent-capable=true' 'probe-nodes.sh'
+    assertLineContains "$output" 'FAILED at the scheduling layer'
+}
+
+# The other unschedulable case keeps the answer it had: capacity is not a capability problem,
+# and telling an operator to re-probe their nodes over a CPU request would be worse than saying
+# nothing.
+@test "a Pod no node has room for is still about capacity, not about the probe" {
+    givenPod "$FACTS_UNSCHEDULED" "$SCHEDULING_UNSCHEDULABLE"
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 69 ]
+    assertLineContains "$output" 'FAILED at the scheduling layer' 'no node could take the Pod'
+    assertContains "$output" 'free capacity'
+    refuteContains "$output" 'probe-nodes.sh'
 }
 
 @test "a Job admission will refuse is named at apply time, not after the start timeout" {

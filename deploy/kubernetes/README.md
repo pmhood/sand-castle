@@ -14,6 +14,7 @@ deploy/kubernetes/
     ├── create-secrets.sh the two credential Secrets the Job reads (§14, §15)
     ├── render-job.sh     substitutes the placeholders; the only renderer
     ├── launch-run.sh     runs one run and follows it; the Phase 2 command (§36)
+    ├── probe-nodes.sh    measures which nodes can run the agent binary, and labels them (#30)
     ├── validate.sh       kubeconform + property assertions; what CI runs
     └── prove-checks.sh   breaks each property and requires validate.sh to notice
 ```
@@ -32,7 +33,12 @@ Once, to set the cluster up:
 kubectl apply -f deploy/kubernetes/namespace.yaml
 kubectl apply -f deploy/kubernetes/serviceaccount.yaml
 ./deploy/kubernetes/scripts/create-secrets.sh                # see "Credentials" below
+./deploy/kubernetes/scripts/probe-nodes.sh                   # see "Which nodes can run the agent"
 ```
+
+The last one is not optional and is not a one-off: **until it has run, nothing schedules at
+all**, and it has to run again whenever a node joins the cluster or `job.yaml`'s image digest
+changes.
 
 Then, per run:
 
@@ -89,6 +95,156 @@ The one thing the launcher checks that these commands do not is the **agent**: i
 `[agent]` as a third argument and compares it with what `job.yaml` sets, rather than
 substituting it. `AGENT` is deliberately not a placeholder (see "Running Codex instead of
 Claude"), so asking for an agent the manifest does not run is refused rather than half-done.
+
+## Which nodes can run the agent
+
+`job.yaml` will only schedule a run onto a node labelled `sandcastle.dev/agent-capable=true`:
+
+```yaml
+nodeSelector:
+  sandcastle.dev/agent-capable: "true"
+```
+
+**Why the image's own `linux/amd64` is not enough.** The Claude Code CLI ships as a Bun
+single-file executable, and Bun's modern x86-64 build requires AVX2. An image manifest list
+cannot express that: `amd64` is the finest thing it can say, and this cluster's two amd64 nodes
+are not equivalent.
+
+| node | CPU | AVX2 | `claude --version`, same image digest |
+| --- | --- | --- | --- |
+| `red` | Core i7-6700 (Skylake, 2015) | yes | `2.1.236 (Claude Code)`, exit 0 |
+| `nova` | Core 2 Duo P8800 (2009) | no | nothing at all, exit **132** |
+
+132 is 128+4, SIGILL. Before the `nodeSelector`, nothing constrained which of the two a run
+landed on, so the same command succeeded or failed by coin flip -- and the failure arrived
+*after* the clone, the branch and the issue fetch had all worked, looking exactly like a bug in
+the agent. That is the worst shape a bug can have, and it is the reason this section exists.
+
+### The label is measured, not asserted
+
+```sh
+./deploy/kubernetes/scripts/probe-nodes.sh            # probe every node and label each
+./deploy/kubernetes/scripts/probe-nodes.sh red nova   # probe only these
+./deploy/kubernetes/scripts/probe-nodes.sh --show     # what the cluster says now; changes nothing
+```
+
+`probe-nodes.sh` runs the **real binary** on each node: a one-container Pod, pinned to that node,
+from the exact image digest `job.yaml` pins, whose command is `claude --version`. That command
+makes no provider call, needs no credential and prints a version string, so the Pod carries no
+Secret and no environment at all. The node is then labelled by what happened:
+
+| what the container did | label | why |
+| --- | --- | --- |
+| exited 0 | `true` | the binary ran here |
+| exited non-zero (132 is SIGILL) | `false` | the binary is here and cannot run |
+| never ran -- image unpullable, Pod never started, timeout | *unchanged* | nothing was measured |
+
+That third row is the point. An image that never arrived says nothing about whether the node
+could have executed it, so the probe writes no label, says `NOT MEASURED`, and exits non-zero;
+whatever the node claimed before, it still claims, and `--show` will say which image that claim
+was about.
+
+The alternative was a hand-applied label, which is two lines of `kubectl` and no script. It was
+rejected because it is an operator's **claim**, and a wrong claim reproduces this bug exactly --
+the label would say `true`, the scheduler would believe it, and the run would SIGILL. A check on
+the CPU's AVX2 flag was rejected for a weaker version of the same reason: it tests a proxy for
+today's cause, and the next incompatibility will be some other instruction, a glibc version or a
+kernel feature. Running the binary is the only question worth asking, and it costs one Pod start
+per node, perhaps twice a year.
+
+The probe's own costs, stated rather than hidden:
+
+- **It is about one image.** See the next section.
+- **A node added later is unlabelled**, and therefore invisible: runs keep going to the nodes
+  that are labelled, and nobody is told the new node is idle. Exclusion is the safe direction --
+  the failure is capacity, not a SIGILL -- but it is a thing to remember when a node joins.
+- **It needs cluster-scoped permission** to list, label and annotate nodes, which is more than
+  `launch-run.sh` otherwise asks for. The probe is an operator's tool, not part of a run.
+- **It uses `nodeName`, deliberately skipping the scheduler.** It has to: a node with no
+  capability label is one `job.yaml`'s own selector excludes, so a scheduled probe could never
+  measure a node that had not already been measured, and a cordoned node could not be measured
+  at all.
+
+### A label is an answer about one image
+
+`job.yaml`'s digest moves (`§20`: an immutable digest, updated deliberately), and a node
+verified against last month's image is a `true` about a binary this run will not execute. Since
+nothing in Kubernetes notices that -- the selector matches the label, not the reason for it --
+the probe records what it measured beside the label:
+
+```text
+sandcastle.dev/agent-capable        true                     (a label, so the selector can match it)
+sandcastle.dev/agent-capable-image  ghcr.io/…@sha256:de6e…   (an annotation: what was measured)
+```
+
+An annotation rather than a richer label value, for two reasons: a label value is capped at 63
+characters and `ghcr.io/pmhood/sandcastle-agent@sha256:<64 hex>` does not fit, and folding the
+digest into the value would put the digest in `job.yaml` twice and turn a stale cluster into
+"no node matched a selector" rather than into what it is.
+
+`launch-run.sh` compares the two **before it applies anything**, and **refuses** the run if any
+node it could be scheduled onto was measured against a different image -- or carries the label
+with no recorded image at all, which is what a hand-applied one looks like.
+
+A refusal rather than a warning, and the asymmetry is the argument. A stale label costs an
+intermittent SIGILL that presents as an agent bug; re-probing costs one command and about a
+minute. A warning would arrive in the middle of a launch that then appears to proceed, which is
+exactly when nobody reads it. And it is *every* candidate node that has to agree, not just one,
+because the scheduler chooses among all of them: "mostly verified" is the coin flip this whole
+section is about.
+
+Not being able to *look* is treated differently from seeing a mismatch. Listing nodes is
+cluster-scoped and nothing else the launcher does is, so a kubeconfig that may not read them
+gets a line saying so and the run proceeds -- the scheduler still enforces the `nodeSelector`,
+and the failure below still explains it. Absence of evidence is not evidence.
+
+### What it looks like when nothing is labelled
+
+On a cluster nobody has probed, **no run schedules at all**. That is the safe direction, and it
+would be mysterious if it were silent, so it is said twice. Before anything is applied:
+
+```text
+[LAUNCH] FAILED at the capability layer: no node carries sandcastle.dev/agent-capable=true, and
+[LAUNCH] job.yaml schedules a run onto nothing else
+[LAUNCH]   Fix: ./deploy/kubernetes/scripts/probe-nodes.sh runs `claude --version` on each node
+[LAUNCH]        and labels what actually happened
+```
+
+and if a Job reaches the scheduler anyway -- applied by hand, or a label removed while the run
+was starting -- the scheduler's own sentence is quoted with what it does not say added:
+
+```text
+[LAUNCH] Pod is not scheduled yet: 0/2 nodes are available: 2 node(s) didn't match Pod's node
+[LAUNCH] affinity/selector. …
+[LAUNCH]   no node carries sandcastle.dev/agent-capable=true, and job.yaml only schedules onto
+[LAUNCH]   one that does. Measure them: ./deploy/kubernetes/scripts/probe-nodes.sh
+```
+
+That second message is worth the code it takes. The scheduler says *"didn't match Pod's node
+affinity/selector"* for a taint, for a busy cluster and for this, identically, and on a cluster
+nobody has probed it is every node at once -- which reads as a broken cluster rather than as a
+step nobody has run yet.
+
+### If a node lies
+
+Nothing stops an operator labelling a node by hand, and the label is trusted by the scheduler
+the moment it exists. A `true` on a node that cannot run the binary produces exactly #30 again:
+
+```text
+[SANDCASTLE] Environment validated
+[GIT] Cloning octocat/Hello-World from https://github.com
+[GITHUB] Issue #1 read
+[CLAUDE] Starting Claude Code CLI
+[LAUNCH] FAILED at the agent layer: the run started and exited 132
+```
+
+Everything works and then the agent dies with no output of its own, because SIGILL leaves none
+-- the `Illegal instruction (core dumped)` line #30 quoted comes from a shell, and there is no
+shell in the Pod. **Exit 132 from a run means read this section**, and the first thing to run is
+`probe-nodes.sh --show`, then `probe-nodes.sh`. A hand-applied label is caught before the run
+these days, because it carries no `sandcastle.dev/agent-capable-image` annotation and the
+launcher refuses a `true` with no provenance -- but a label hand-applied *with* a matching
+annotation is still a claim nobody measured, and nothing here can see that.
 
 ## What a successful run prints
 
@@ -150,6 +306,8 @@ launcher matches are what Kubernetes actually said rather than what it seemed li
 | `cluster` | this kubeconfig may not look | the same stderr: `Unauthorized`, `forbidden` | use a context with access to the namespace |
 | `cluster` | the namespace is missing | the same call, any other error | `kubectl apply -f namespace.yaml` |
 | `cluster` | the ServiceAccount is missing | `kubectl get serviceaccount` before applying | `kubectl apply -f serviceaccount.yaml` |
+| `capability` | no node is labelled able to run the agent binary | `kubectl get nodes -l sandcastle.dev/agent-capable=true` before applying | `probe-nodes.sh` |
+| `capability` | a candidate node was measured against another image | the same nodes' `sandcastle.dev/agent-capable-image` vs `job.yaml`'s digest | `probe-nodes.sh` again; `--show` says which image each carries |
 | `cluster` | the run ID is already a Job | `kubectl get job` before applying | pick another `RUN_ID`, or delete that Job |
 | `credentials` | a Secret is missing, misnamed, or holds the wrong key | `create-secrets.sh --verify`, before applying | `create-secrets.sh` |
 | `cluster` | the API server refused the Job | non-zero `kubectl apply` | `validate.sh`, then fix `job.yaml` |
@@ -164,13 +322,19 @@ launcher matches are what Kubernetes actually said rather than what it seemed li
 | `runtime` | the container's process could not start | terminated `StartError` | the image's entrypoint, not the agent |
 | `runtime` | it exceeded its memory limit | terminated `OOMKilled` (exit 137) | raise the memory limit (§23) |
 | `scheduling` | no node could take the Pod | `PodScheduled=False`, reason `Unschedulable` | free capacity, or lower the requests (§23) |
+| `scheduling` | …and no node matched the selector | the same, message `didn't match Pod's node affinity/selector` | `probe-nodes.sh` ("Which nodes can run the agent") |
 | `scheduling` | the node evicted the Pod | Pod phase `Failed`, reason `Evicted` | node pressure; retry or give it room |
 | `timeout` | it hit `activeDeadlineSeconds` | the **Job's** condition `DeadlineExceeded` | raise it in `job.yaml` if the work is genuinely longer |
 | `cluster` | no Pod within `SANDCASTLE_START_TIMEOUT` | nothing else fired | `kubectl describe job` |
 | `cluster` | no container started within it | nothing else fired | `kubectl describe pod` |
 | **`agent`** | **the run started and exited non-zero** | terminated `Error` with a non-zero exit code | the run's own output above; this is *not* a cluster problem |
 
-Four of those are worth their own paragraph.
+Five of those are worth their own paragraph.
+
+**The two `capability` rows are the only ones checked before a Job exists that are not about
+this cluster's furniture.** They are there because the alternative is a Pod that sits `Pending`
+for `SANDCASTLE_START_TIMEOUT` seconds while the scheduler says a sentence that names neither
+the label nor what to do about it. See "Which nodes can run the agent".
 
 **The architecture mismatch is tested before the missing image**, because its message also ends
 in `not found`. It is the failure that looks least like what it is: the digest is right, the
@@ -219,8 +383,12 @@ at once:
 kubectl -n sandcastle-agents delete job -l app=sandcastle
 ```
 
-The Secrets, the ServiceAccount and the namespace are not a run's to remove and none of these
-touch them.
+The Secrets, the ServiceAccount, the namespace and the nodes' capability labels are not a run's
+to remove and none of these touch them. The labels in particular live on the nodes rather than
+in the namespace, so removing the namespace does not remove them: `kubectl label node <name>
+sandcastle.dev/agent-capable-` and `kubectl annotate node <name>
+sandcastle.dev/agent-capable-image-` are how they go, and after that nothing schedules until
+`probe-nodes.sh` runs again.
 
 ## No credential passes through the launcher
 
@@ -491,7 +659,14 @@ every manifest with `kubeconform -strict`, and then asserts the properties a sch
 the image is a digest and not a tag, `backoffLimit` is 0, the TTL is §47's 24 hours, the §50
 security context is present and set as it should be, `automountServiceAccountToken` is false on
 both the Pod and the ServiceAccount, the resource limits are §23's, the writable paths are
-mounted and are `emptyDir`s, and no `env:` entry carries a literal credential value.
+mounted and are `emptyDir`s, the `nodeSelector` is the capability one, and no `env:` entry
+carries a literal credential value.
+
+The `nodeSelector` gets two assertions rather than one, and the second is about a *type*: the
+value must be the string `"true"`, because a label value is a string and an unquoted `true` is a
+YAML boolean the API server refuses. Its mutation has to write the boolean itself -- `yq`'s
+`style=""` re-quotes a string whose text would otherwise parse as one, so unquoting cannot be
+expressed as a style change the way it can for the run-ID placeholders.
 
 Some of those assertions are only as good as the shape of the thing they read, so the shape is
 asserted too. An assertion about `containers[0]` says nothing about a sidecar; an exhaustive
@@ -545,13 +720,22 @@ rather than in that suite because they are about `deploy/`, not about the image:
 second bats suite would mean a second copy of the suite's bootstrapping and a style guard that
 does not reach it, for assertions that need neither.
 
-`create-secrets.sh` and `launch-run.sh` are the exception, and for the same reason rather than
-against it: what has to be checked about them is a *behaviour* -- what they put in argv, what
-they refuse, which failure they name -- which needs a recording fake and the assertion helpers
-the bats suite already has, not a `yq` expression over a file. So both are `shellcheck`ed by the
-`manifests` job here and exercised by `images/agent/bootstrap/test/secrets.bats` and
-`launch.bats` under the `test` job, where a fake `kubectl` bound at `helpers.bash` load time
-means no test can reach a cluster.
+`create-secrets.sh`, `launch-run.sh` and `probe-nodes.sh` are the exception, and for the same
+reason rather than against it: what has to be checked about them is a *behaviour* -- what they
+put in argv, what they refuse, which failure they name, what they conclude from a container's
+exit code -- which needs a recording fake and the assertion helpers the bats suite already has,
+not a `yq` expression over a file. So all three are `shellcheck`ed by the `manifests` job here
+and exercised by `images/agent/bootstrap/test/secrets.bats`, `launch.bats` and `probe.bats`
+under the `test` job, where a fake `kubectl` bound at `helpers.bash` load time means no test can
+reach a cluster.
+
+`probe.bats` is about one property: the probe only ever says what it measured. Its fixtures are
+the Pod statuses the real cluster reported for `red` (`Succeeded`, exit 0, `2.1.236 (Claude
+Code)`) and for `nova` (`Failed`, exit 132, no output at all), plus the `ErrImagePull` message
+from a copy of these manifests with the digest zeroed. The tests that matter are the ones about
+what it does *not* claim: a node whose image never arrived keeps its label and the run exits
+non-zero, and a node that could not be annotated with the image it was measured against is
+reported as untrustworthy rather than left quietly labelled `true`.
 
 `launch.bats` drives that fake with output **recorded from the real cluster**: each failure mode
 was induced there with fake values and the resulting Pod status, Job condition or event was
@@ -568,9 +752,13 @@ log relay, and three separate ways of leaking a credential -- and the suite re-r
 mutation was caught, by the test it should have been caught by.
 
 The launcher needs no new assertion in `validate.sh`: what it relies on in `job.yaml` -- an
-`AGENT` entry with a literal value, an `image:` pinned to a digest -- is already pinned there,
-by the assertion that the entries carrying a literal `value:` are exactly `AGENT`,
-`GITHUB_ISSUE_NUMBER`, `GITHUB_REPOSITORY` and `SANDCASTLE_RUN_ID`, and by the digest pattern.
+`AGENT` entry with a literal value, an `image:` pinned to a digest, a `nodeSelector` naming the
+capability label -- is already pinned there, by the assertion that the entries carrying a
+literal `value:` are exactly `AGENT`, `GITHUB_ISSUE_NUMBER`, `GITHUB_REPOSITORY` and
+`SANDCASTLE_RUN_ID`, by the digest pattern, and by the two `nodeSelector` assertions.
+`probe-nodes.sh` reads the same two fields out of `job.yaml` with the same `awk` the launcher
+uses, rather than `yq`: an operator probing their cluster should need nothing installed beyond
+`kubectl`, and `yq` is a validation-time dependency.
 
 `prove-checks.sh` is the other half of the house rule. It copies the manifests, breaks exactly
 one property, runs `validate.sh` against the copy and requires it to fail, once per property,
@@ -616,6 +804,19 @@ arm64-only image, a GHCR package that does not exist, a misspelled `key:`, a 100
 a 4Mi memory limit, and -- against the cluster itself -- a deleted ServiceAccount, a deleted
 Secret and an unreachable `KUBECONFIG`. Everything created was deleted afterwards.
 
+`probe-nodes.sh` has no dry run for the same reason `create-secrets.sh` does not: what is worth
+checking is what actually happens on the node. It was run against the k3s cluster and reported
+`red` capable (`exit 0, 2.1.236 (Claude Code)`) and `nova` not (`exit 132 (SIGILL)`), labelling
+each and recording the digest beside it; both probe Pods were removed by the script itself. The
+three surrounding cases were induced there too: a rendered Job applied with neither node
+labelled stayed `Pending` with `0/2 nodes are available: 2 node(s) didn't match Pod's node
+affinity/selector`; a Pod carrying the same `nodeSelector` and no `nodeName` was scheduled onto
+`red` and onto `red` only; a copy of these manifests with the digest zeroed produced
+`NOT MEASURED`, left `nova`'s label exactly as it was and exited non-zero; and a node annotated
+with a different digest made the launcher refuse at the capability layer before applying
+anything. Everything created was deleted afterwards, and the node labels were removed, so the
+probe below is not optional.
+
 The **acceptance run belongs to the repo owner**, like Phase 1's smoke test, because it is the
 half that needs real credentials:
 
@@ -625,6 +826,7 @@ export CLAUDE_CODE_OAUTH_TOKEN=...   # from `claude setup-token`; the token, not
 kubectl apply -f deploy/kubernetes/namespace.yaml
 kubectl apply -f deploy/kubernetes/serviceaccount.yaml
 ./deploy/kubernetes/scripts/create-secrets.sh
+./deploy/kubernetes/scripts/probe-nodes.sh         # nothing schedules until this has run
 ./deploy/kubernetes/scripts/launch-run.sh <owner/repo> <issue-number>
 ```
 

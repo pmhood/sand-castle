@@ -299,7 +299,7 @@ checkNothingElseIsSet() {
         "runAsGroup runAsNonRoot runAsUser seccompProfile" \
         "$(read_ "$job" "[$pod.securityContext | keys | .[]] | sort | join(\" \")")"
     check "the Pod spec is exactly these fields (§50)" \
-        "automountServiceAccountToken containers restartPolicy securityContext serviceAccountName volumes" \
+        "automountServiceAccountToken containers nodeSelector restartPolicy securityContext serviceAccountName volumes" \
         "$(read_ "$job" "[$pod | keys | .[]] | sort | join(\" \")")"
     check "the Job spec is exactly these fields (§19, §23, §47)" \
         "activeDeadlineSeconds backoffLimit template ttlSecondsAfterFinished" \
@@ -309,6 +309,27 @@ checkNothingElseIsSet() {
     # AppArmor override that never touches a securityContext.
     check "the Pod template's metadata is exactly these fields (§50)" \
         "labels" "$(read_ "$job" '[.spec.template.metadata | keys | .[]] | sort | join(" ")')"
+}
+
+# #30: a manifest that does not state a requirement the workload has is a requirement that gets
+# violated. The image's `linux/amd64` is the most a manifest list can say and it is not enough --
+# the agent CLI is a Bun executable that needs AVX2, and one of this cluster's two amd64 nodes
+# SIGILLs on it -- so a run may only land on a node scripts/probe-nodes.sh has measured. An
+# unlabelled node is excluded, which is the safe direction and the reason this cannot be a
+# selector that merely happens to be set: `false` is what the probe writes on a node where the
+# binary died, and selecting it would schedule every run onto exactly the nodes that cannot run.
+#
+# The value is asserted as text as well, for the reason every placeholder in job.yaml is quoted:
+# a bare `true` is a YAML boolean, and a label selector value is a string. The API server
+# refuses the Job outright, which is a better failure than most -- but it is a failure found by
+# applying rather than by validating, and this script exists so it is the other way round.
+checkScheduling() {
+    local job=$1 selector=".spec.template.spec.nodeSelector"
+
+    check "a run only schedules onto a node measured to run the agent binary (#30)" \
+        "true" "$(read_ "$job" "$selector.\"sandcastle.dev/agent-capable\"")"
+    check "the capability selector's value is text, as a label value must be (#30)" \
+        "!!str" "$(read_ "$job" "$selector.\"sandcastle.dev/agent-capable\" | tag")"
 }
 
 checkResources() {
@@ -418,6 +439,7 @@ main() {
     checkJobLabels "$job"
     checkImageIsPinned "$job"
     checkSecurityContext "$job"
+    checkScheduling "$job"
     checkResources "$job"
     checkWritablePaths "$job"
     checkCredentialWiring "$job"

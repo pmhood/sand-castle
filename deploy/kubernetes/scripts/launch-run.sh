@@ -34,6 +34,12 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly NAMESPACE="sandcastle-agents"
 readonly SERVICE_ACCOUNT="sandcastle-agent"
 
+# job.yaml's nodeSelector, named here because the scheduler's refusal does not name it (#30),
+# and the annotation scripts/probe-nodes.sh writes beside it saying which image it measured.
+readonly CAPABILITY_LABEL="sandcastle.dev/agent-capable"
+readonly CAPABILITY_IMAGE_ANNOTATION="sandcastle.dev/agent-capable-image"
+readonly PROBE_SCRIPT="./deploy/kubernetes/scripts/probe-nodes.sh"
+
 # sysexits(3) values, so that a run that never happened is distinguishable from an agent that
 # ran and failed: an agent failure exits with the *container's* own status, which is small and
 # ordinary. The message is the authority either way; the code is for whatever wraps this.
@@ -202,6 +208,60 @@ requireAgentMatchesManifest() {
         dieUsage "job.yaml runs '$manifestAgent', not '$AGENT'. The agent and its credential change together: see deploy/kubernetes/README.md, \"Running Codex instead of Claude\"."
 }
 
+# The nodes job.yaml's selector will let this run onto, each with the image scripts/probe-nodes.sh
+# measured it against. One line per node, `name|image`, and an unannotated node yields an empty
+# second field rather than dropping a line.
+capableNodes() {
+    kubectl get nodes -l "$CAPABILITY_LABEL=true" \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.annotations.sandcastle\.dev/agent-capable-image}{"\n"}{end}' 2>&1
+}
+
+# The half of #30 that a nodeSelector alone cannot state. The label is a measurement, and what
+# it measured was one binary in one image: job.yaml's digest moves, deliberately (§20), and a
+# node verified against the previous one is a `true` that is about something else. Nothing in
+# Kubernetes notices that -- the selector matches the label, not the reason for it -- so it is
+# checked here, before a Job exists, against what probe-nodes.sh recorded.
+#
+# It is a refusal and not a warning, and the asymmetry is the argument: a stale label costs an
+# intermittent SIGILL that presents as an agent bug (this issue, and the sibling one about
+# misreading it), and re-probing costs one command and about a minute. A warning would arrive in
+# the middle of a launch that then appears to proceed, which is precisely when nobody reads it.
+# Every capable node must agree with the manifest, not merely one of them, because the scheduler
+# chooses among all of them and "mostly verified" is the coin flip this issue is about.
+#
+# Not being able to *look* is different from seeing a mismatch, and is not fatal: listing nodes
+# is cluster-scoped, and launch-run.sh otherwise needs nothing outside its namespace. Absence of
+# evidence leaves the scheduler to enforce the selector and reportScheduling to explain it.
+requireNodesVerifiedForThisImage() {
+    local image output node nodeImage capable=0 stale=''
+
+    image=$(manifestImage)
+    if ! output=$(capableNodes); then
+        log "Cannot read the cluster's nodes, so $CAPABILITY_LABEL is unverified here: ${output%%$'\n'*}"
+        log "  The scheduler still enforces job.yaml's nodeSelector; this check only reads it early."
+        return 0
+    fi
+
+    while IFS=$FIELD_SEPARATOR read -r node nodeImage; do
+        [ -n "$node" ] || continue
+        capable=$((capable + 1))
+        [ "$nodeImage" != "$image" ] || continue
+        # Names only, on one line: which image each of them carries is what `--show` is for, and
+        # a message that has to wrap to be read is a message that does not get read.
+        stale="$stale $node"
+    done <<<"$output"
+
+    # No `detail` on either: `fail` labels that "Kubernetes said", and what follows here is this
+    # script's own reading of the cluster rather than anything Kubernetes was asked to judge.
+    [ "$capable" -gt 0 ] ||
+        fail capability "no node carries $CAPABILITY_LABEL=true, and job.yaml schedules a run onto nothing else" \
+            "$PROBE_SCRIPT runs \`$AGENT --version\` on each node and labels what actually happened"
+
+    [ -z "$stale" ] ||
+        fail capability "$CAPABILITY_LABEL is a claim about another image on:$stale (their $CAPABILITY_IMAGE_ANNOTATION is not the digest job.yaml pins)" \
+            "$PROBE_SCRIPT re-measures them against the image job.yaml pins now, and $PROBE_SCRIPT --show says which image each node carries"
+}
+
 # Everything that can be known before the Job exists. Each check names the file that fixes it,
 # because once a Job is applied every one of these looks the same from outside: no Pod.
 preflight() {
@@ -233,6 +293,11 @@ preflight() {
     kubectl get serviceaccount "$SERVICE_ACCOUNT" --namespace "$NAMESPACE" >/dev/null 2>&1 ||
         fail cluster "ServiceAccount $SERVICE_ACCOUNT does not exist in $NAMESPACE" \
             "kubectl apply -f deploy/kubernetes/serviceaccount.yaml"
+
+    # Before the Job rather than after it, because this is the one refusal the cluster would
+    # otherwise express as a Pod that sits Pending for $START_TIMEOUT seconds saying only that
+    # no node matched a selector (#30).
+    requireNodesVerifiedForThisImage
 
     # Only reachable with RUN_ID set by hand; a generated one cannot collide. Applying over a
     # live Job would be refused for its immutable fields, and applying over a finished one
@@ -426,9 +491,29 @@ classifyWaiting() {
     esac
 }
 
+# What to do about a Pod no node will take. The scheduler counts nodes and names the predicate
+# that ruled each one out, and one of those predicates is job.yaml's own: a node that has not
+# been probed carries no `sandcastle.dev/agent-capable` label and is excluded on purpose (#30).
+# That is the case an operator cannot act on from the message alone -- "didn't match Pod's node
+# affinity/selector" reads like a mistake in the manifest, and on a cluster nobody has probed it
+# is every node at once, so nothing runs and the cluster looks broken. Capacity is the other
+# case and keeps the answer it had.
+schedulingFix() {
+    case $1 in
+        *"node affinity/selector"* | *"nodeSelector"*)
+            printf 'no node carries %s=true, and job.yaml only schedules onto one that does. Measure them: %s (deploy/kubernetes/README.md, "Which nodes can run the agent")' \
+                "$CAPABILITY_LABEL" "$PROBE_SCRIPT"
+            ;;
+        *)
+            printf 'free capacity, or lower the requests in job.yaml (§23)'
+            ;;
+    esac
+}
+
 # Says the Pod is unschedulable once, and only once, while it waits. Scheduling can still
-# resolve -- a node comes back, another Pod finishes -- so this is not fatal until the start
-# timeout, which is what reports it as such.
+# resolve -- a node comes back, another Pod finishes, someone runs the probe -- so this is not
+# fatal until the start timeout, which is what reports it as such. The fix is said here as well
+# as there because the difference between the two is $START_TIMEOUT seconds of silence.
 reportScheduling() {
     local reason message
     IFS=$FIELD_SEPARATOR read -r reason message <<<"$(schedulingFacts)"
@@ -436,6 +521,7 @@ reportScheduling() {
     [ "$SCHEDULING_REPORTED" = no ] || return 0
     SCHEDULING_REPORTED=yes
     log "Pod is not scheduled yet: $message"
+    log "  $(schedulingFix "$message")"
 }
 
 # Waits for the container to start, or to fail to. Returns 0 while there is still a Pod whose
@@ -468,7 +554,7 @@ waitForContainer() {
             IFS=$FIELD_SEPARATOR read -r podReason message <<<"$(schedulingFacts)"
             [ "$podReason" != Unschedulable ] ||
                 fail scheduling "no node could take the Pod within ${START_TIMEOUT}s" \
-                    "free capacity, or lower the requests in job.yaml (§23)" "$message"
+                    "$(schedulingFix "$message")" "$message"
             fail cluster "the container did not start within ${START_TIMEOUT}s" \
                 "kubectl -n $NAMESPACE describe pod $POD_NAME" "phase $phase, waiting: ${waiting:-none}"
         }

@@ -120,6 +120,18 @@ validateEnvironment() {
     [[ $GITHUB_ISSUE_NUMBER =~ ^[1-9][0-9]*$ ]] ||
         die "GITHUB_ISSUE_NUMBER must be a positive integer"
 
+    # GITHUB_TOKEN is interpolated into a curl --config line in fetchIssueContext (a quoted
+    # `header = "Authorization: Bearer ..."` directive). Every real GitHub token -- classic PAT,
+    # ghp_/gho_/ghu_/ghs_/ghr_, and the fine-grained github_pat_ form -- is letters, digits,
+    # underscores and hyphens only, so that is what this accepts; a `"` followed by a newline is
+    # exactly what closes the quoted string and starts a new curl directive (issue #7's
+    # reviewer used it to make curl write an arbitrary file), and this shape check refuses it
+    # before the value ever reaches curl. It arrives here from a Kubernetes Secret the Sand
+    # Castle server injects without inspecting (§14, §15), so it cannot be assumed well-formed.
+    # The message names the defect, never the value (§14).
+    [[ $GITHUB_TOKEN =~ ^[A-Za-z0-9_-]+$ ]] ||
+        die "GITHUB_TOKEN must contain only letters, digits, '_' or '-'"
+
     case $AGENT in
         claude | codex) ;;
         *) die "AGENT must be 'claude' or 'codex'" ;;
@@ -161,6 +173,9 @@ fetchIssueContext() {
     # expose it for the length of the request; printf is a builtin, so it has no argv either.
     # curl is quiet on success, so on failure $response holds its error text, which never
     # contains the header value.
+    # GITHUB_TOKEN is interpolated straight into this quoted curl-config directive; that is
+    # safe only because validateEnvironment already refused any value holding a '"', a newline
+    # or anything else that could close the quote and start a directive of its own (issue #7).
     response=$(printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" |
         curl --disable --config - \
             --silent --show-error --fail --location --max-time 30 \

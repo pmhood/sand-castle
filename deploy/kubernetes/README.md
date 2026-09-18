@@ -235,19 +235,39 @@ the moment it exists. A `true` on a node that cannot run the binary produces exa
 
 ```text
 [SANDCASTLE] Environment validated
-[GIT] Cloning octocat/Hello-World from https://github.com
-[GITHUB] Issue #1 read
-[CLAUDE] Starting Claude Code CLI
-[LAUNCH] FAILED at the agent layer: the run started and exited 132
+[GIT] Cloning pmhood/alpine from https://github.com
+[GITHUB] Issue #1: Add a README.md
+[CLAUDE] Starting Claude Code CLI in /workspace/repo
+/usr/local/bin/runners/claude.sh: line 14:    33 Illegal instruction     (core dumped) claude …
+[CLAUDE] Claude Code CLI exited with status 132
+[SANDCASTLE] Run run-20260918-003624-fa2cba failed
+[LAUNCH] FAILED at the node layer: SIGILL killed the run on node nova (exit 132 is 128+4, and no signal was reported)
+[LAUNCH]   Fix: node nova cannot execute this build of the agent binary -- SIGILL is an
+[LAUNCH]        instruction its CPU does not have (#30). …
+[LAUNCH]   Kubernetes said:
+[LAUNCH]     terminated: reason Error, exit code 132
 ```
 
-Everything works and then the agent dies with no output of its own, because SIGILL leaves none
--- the `Illegal instruction (core dumped)` line #30 quoted comes from a shell, and there is no
-shell in the Pod. **Exit 132 from a run means read this section**, and the first thing to run is
-`probe-nodes.sh --show`, then `probe-nodes.sh`. A hand-applied label is caught before the run
-these days, because it carries no `sandcastle.dev/agent-capable-image` annotation and the
-launcher refuses a `true` with no provenance -- but a label hand-applied *with* a matching
-annotation is still a claim nobody measured, and nothing here can see that.
+Everything works, and then the agent dies partway through the one step that matters.
+**Exit 132 from a run means read this section**, and the first thing to run is `probe-nodes.sh
+--show`, then `probe-nodes.sh`. A hand-applied label is caught before the run these days,
+because it carries no `sandcastle.dev/agent-capable-image` annotation and the launcher refuses a
+`true` with no provenance -- but a label hand-applied *with* a matching annotation is still a
+claim nobody measured, and nothing here can see that.
+
+**A run Pod and a probe Pod report a SIGILL differently, and the difference is load-bearing.**
+A run Pod's PID 1 is `sandcastle-run`, a bash script (§12), and the agent CLI is its child. When
+the child dies of SIGILL, that bash reaps it and prints the `Illegal instruction (core dumped)`
+job line above on its own stderr -- unprefixed, because it is bash talking rather than the
+bootstrap, and naming `runners/claude.sh` because that is the file the sourced `invokeAgent`
+came from. `pipefail` then makes the pipeline's status 132, and the bootstrap exits with it
+deliberately. So the run's log *does* name the signal, and the container's status is a shell
+propagating 132 rather than a signal death of PID 1 -- which is exactly what the launcher's
+fallback relies on, because no runtime here fills in `state.terminated.signal` and 128+n is what
+this image actually produces (see "When a run fails"). A **probe** Pod has no shell at all --
+its command is `["claude", "--version"]`, so the binary *is* PID 1 -- and there SIGILL leaves no
+output whatsoever: `probe-nodes.sh` names the 132 in its own message precisely because nothing
+else will.
 
 ## What a successful run prints
 
@@ -325,15 +345,18 @@ launcher matches are what Kubernetes actually said rather than what it seemed li
 | `runtime` | the container could not be created | `CreateContainerError`, `RunContainerError` | read the quoted runtime message |
 | `runtime` | the container's process could not start | terminated `StartError` | the image's entrypoint, not the agent |
 | `runtime` | it exceeded its memory limit | terminated `OOMKilled` (exit 137) | raise the memory limit (§23) |
+| `node` | **SIGILL**: the node cannot execute the binary | terminated `signal` 4, else exit 132 | `probe-nodes.sh`; the node is labelled capable and is not |
+| `runtime` | **SIGABRT, SIGBUS, SIGFPE, SIGSEGV**: the process faulted | terminated `signal` 6, 7, 8, 11 -- else exit 134, 135, 136, 139 | the run's own output, where it stops |
+| `runtime` | **any other signal, SIGKILL included** | terminated `signal`, else exit 128+n | something outside the run ended it; `describe pod`, check the node |
 | `scheduling` | no node could take the Pod | `PodScheduled=False`, reason `Unschedulable` | free capacity, or lower the requests (§23) |
 | `scheduling` | …and no node matched the selector | the same, message `didn't match Pod's node affinity/selector` | `probe-nodes.sh` ("Which nodes can run the agent") |
 | `scheduling` | the node evicted the Pod | Pod phase `Failed`, reason `Evicted` | node pressure; retry or give it room |
 | `timeout` | it hit `activeDeadlineSeconds` | the **Job's** condition `DeadlineExceeded` | raise it in `job.yaml` if the work is genuinely longer |
 | `cluster` | no Pod within `SANDCASTLE_START_TIMEOUT` | nothing else fired | `kubectl describe job` |
 | `cluster` | no container started within it | nothing else fired | `kubectl describe pod` |
-| **`agent`** | **the run started and exited non-zero** | terminated `Error` with a non-zero exit code | the run's own output above; this is *not* a cluster problem |
+| **`agent`** | **the run started and exited non-zero** | terminated `Error`, a non-zero exit code, and no signal | the run's own output above; the run chose that status |
 
-Five of those are worth their own paragraph.
+Seven of those are worth their own paragraph.
 
 **The two `capability` rows are the only ones checked before a Job exists that are not about
 this cluster's furniture.** They are there because the alternative is a Pod that sits `Pending`
@@ -357,6 +380,43 @@ on that warning rather than waiting out the start timeout to say the same thing.
 **An image pull failure is reported the first time it is seen.** A genuinely transient registry
 outage therefore surfaces here too; the quoted message is what tells the two apart, and
 re-running is the answer.
+
+**A signal is not an exit status the run chose**, and the three signal rows exist because the
+classifier used to have no branch for that at all (#31). It read `reason: Error` with a non-zero
+code as the agent's own failure and said so confidently -- "the container ran, so this is not a
+cluster problem" -- for a run that had died of `Illegal instruction` on a node whose CPU cannot
+execute the agent binary. Both halves were wrong: it was the node, and the run's own output
+could not explain it as an agent failure -- every §31 stage the bootstrap reports had succeeded,
+and the last line before the end was bash naming a signal, not the agent naming a problem. (The
+run's output is not *silent* on a SIGILL, which "If a node lies" now sets out: a run Pod has a
+shell for PID 1 and a probe Pod does not. It says the wrong thing, not nothing.) The grouping is
+the design. SIGILL means this hardware cannot run this binary and points at `probe-nodes.sh`;
+SIGSEGV, SIGABRT, SIGBUS and SIGFPE all mean the process faulted and all point at the run's
+output, so they share one message and each prints its own name; everything else, SIGKILL
+included, means something outside the process ended it -- and SIGKILL keeps its OOM answer,
+because `reason: OOMKilled` is matched before any of this.
+
+**How a signal is detected is worth knowing, because it is not perfect.** `state.terminated.signal`
+is the authority where a runtime fills it in: it says a signal ended the container, and it is
+read before the exit code, so a container that genuinely exits 132 on such a runtime is not
+mistaken for SIGILL. containerd -- what k3s runs here -- fills in nothing: a container whose PID
+1 was killed by SIGILL on `nova` and a container that ran `exit 132` report the same `reason`,
+the same code and no signal, field for field. So the second reading is the 128+n convention,
+which is also what this image actually produces: its PID 1 is the bootstrap, a shell, and a
+shell whose child dies of signal *n* exits 128+*n* itself, which is exactly what the run behind
+#31 did. The launcher says which of the two readings it used, in the message, so an operator can
+disagree with it:
+
+```text
+[LAUNCH] FAILED at the node layer: SIGILL killed the run on node nova (exit 132 is 128+4, and no signal was reported)
+[LAUNCH]   Fix: node nova cannot execute this build of the agent binary -- SIGILL is an
+[LAUNCH]        instruction its CPU does not have (#30). ./deploy/kubernetes/scripts/probe-nodes.sh
+[LAUNCH]        runs `claude --version` from job.yaml's image on each node and labels what
+[LAUNCH]        happened, so a node the binary dies on ends up
+[LAUNCH]        sandcastle.dev/agent-capable=false and takes no run
+[LAUNCH]   Kubernetes said:
+[LAUNCH]     terminated: reason Error, exit code 132
+```
 
 ## Teardown
 

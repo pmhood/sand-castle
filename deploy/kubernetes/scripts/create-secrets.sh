@@ -120,8 +120,7 @@ requireNamespace() {
 
 # Reads the credential file, without letting it override what the operator just exported.
 #
-# The environment winning is the convention everywhere else a value can arrive twice in this
-# repo (smoke.sh's own parseArgs and its own sourcing of this same file, render-job.sh), and it
+# The environment winning is the convention smoke.sh's own parseArgs follows too, and it
 # matters more here than anywhere else: this script writes to a cluster, so a stale line in
 # .env.local silently beating an exported value would install yesterday's credential and say
 # nothing about it. Save what the environment has, source, put it back.

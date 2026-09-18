@@ -35,6 +35,15 @@ readonly SAMPLE_ISSUE_NUMBER="1"
 # A run ID that is a valid DNS-1123 label and also reads as a YAML integer; see checkScalarTypes.
 readonly SAMPLE_NUMERIC_RUN_ID="0755"
 
+# Distinct canaries for checkArgumentPrecedence, so a failure there says which value won rather
+# than merely that the two disagreed.
+readonly PRECEDENCE_ENV_RUN_ID="precedence-env-canary"
+readonly PRECEDENCE_ARG_RUN_ID="precedence-arg-canary"
+readonly PRECEDENCE_ENV_REPOSITORY="env-canary/repo"
+readonly PRECEDENCE_ARG_REPOSITORY="arg-canary/repo"
+readonly PRECEDENCE_ENV_ISSUE_NUMBER="4444"
+readonly PRECEDENCE_ARG_ISSUE_NUMBER="9999"
+
 # kubeconform downloads the schema for each kind it sees. One cache directory, reused across
 # runs, keeps that to one download per kind per machine -- which matters to prove-checks.sh,
 # where this script runs once per mutation.
@@ -413,6 +422,87 @@ checkScalarTypes() {
             '[.spec.template.spec.containers[0].env[] | select(has("value")) | .value | tag] | unique | join(" ")')"
 }
 
+# render-job.sh resolves RUN_ID, GITHUB_REPOSITORY and GITHUB_ISSUE_NUMBER from either an
+# argument or an environment variable of the same name, and a passed argument must win over an
+# already-set environment variable (#64). This exercises that precedence directly against
+# render-job.sh, independently of the renderings the checks above assert against -- each
+# variable assignment below is scoped to one command, so nothing here leaks into them or into
+# prove-checks.sh's later run of this same script.
+checkArgumentPrecedence() {
+    local workDir=$1
+    local rendered=$workDir/precedence.yaml errOutput status
+
+    # An argument wins over a different, already-exported value of the same variable.
+    RUN_ID=$PRECEDENCE_ENV_RUN_ID \
+        GITHUB_REPOSITORY=$PRECEDENCE_ENV_REPOSITORY \
+        GITHUB_ISSUE_NUMBER=$PRECEDENCE_ENV_ISSUE_NUMBER \
+        "$SCRIPT_DIR/render-job.sh" \
+        "$PRECEDENCE_ARG_RUN_ID" "$PRECEDENCE_ARG_REPOSITORY" "$PRECEDENCE_ARG_ISSUE_NUMBER" \
+        >"$rendered"
+    check "an explicit run ID argument beats an exported RUN_ID" \
+        "$PRECEDENCE_ARG_RUN_ID" "$(read_ "$rendered" '.metadata.labels."sandcastle.run"')"
+    check "an explicit repository argument beats an exported GITHUB_REPOSITORY" \
+        "$PRECEDENCE_ARG_REPOSITORY" \
+        "$(read_ "$rendered" \
+            '.spec.template.spec.containers[0].env[] | select(.name == "GITHUB_REPOSITORY") | .value')"
+    check "an explicit issue number argument beats an exported GITHUB_ISSUE_NUMBER" \
+        "$PRECEDENCE_ARG_ISSUE_NUMBER" \
+        "$(read_ "$rendered" \
+            '.spec.template.spec.containers[0].env[] | select(.name == "GITHUB_ISSUE_NUMBER") | .value')"
+
+    # With no argument at all, the documented environment-variable form is unchanged.
+    RUN_ID=$PRECEDENCE_ENV_RUN_ID \
+        GITHUB_REPOSITORY=$PRECEDENCE_ENV_REPOSITORY \
+        GITHUB_ISSUE_NUMBER=$PRECEDENCE_ENV_ISSUE_NUMBER \
+        "$SCRIPT_DIR/render-job.sh" \
+        >"$rendered"
+    check "RUN_ID alone still works with no argument" \
+        "$PRECEDENCE_ENV_RUN_ID" "$(read_ "$rendered" '.metadata.labels."sandcastle.run"')"
+    check "GITHUB_REPOSITORY alone still works with no argument" \
+        "$PRECEDENCE_ENV_REPOSITORY" \
+        "$(read_ "$rendered" \
+            '.spec.template.spec.containers[0].env[] | select(.name == "GITHUB_REPOSITORY") | .value')"
+
+    # With nothing exported, the argument form is unchanged -- a subshell `unset` rather than
+    # relying on the ambient environment being clean, because it is not: this is the exact
+    # condition #64 was found under, every GitHub Actions runner already exports
+    # GITHUB_REPOSITORY.
+    (
+        unset RUN_ID GITHUB_REPOSITORY GITHUB_ISSUE_NUMBER
+        "$SCRIPT_DIR/render-job.sh" \
+            "$PRECEDENCE_ARG_RUN_ID" "$PRECEDENCE_ARG_REPOSITORY" "$PRECEDENCE_ARG_ISSUE_NUMBER"
+    ) >"$rendered"
+    check "the run ID argument alone still works with nothing exported" \
+        "$PRECEDENCE_ARG_RUN_ID" "$(read_ "$rendered" '.metadata.labels."sandcastle.run"')"
+    check "the repository argument alone still works with nothing exported" \
+        "$PRECEDENCE_ARG_REPOSITORY" \
+        "$(read_ "$rendered" \
+            '.spec.template.spec.containers[0].env[] | select(.name == "GITHUB_REPOSITORY") | .value')"
+
+    # An exported-but-empty variable is not a value (#26): with no repository argument and
+    # GITHUB_REPOSITORY exported empty, rendering must fail the same way it would if
+    # GITHUB_REPOSITORY had never been set, not fall back to an empty substitution.
+    status=0
+    errOutput=$(
+        GITHUB_REPOSITORY="" GITHUB_ISSUE_NUMBER=$PRECEDENCE_ARG_ISSUE_NUMBER \
+            "$SCRIPT_DIR/render-job.sh" "$PRECEDENCE_ARG_RUN_ID" 2>&1 1>"$rendered"
+    ) || status=$?
+    check "an exported-but-empty GITHUB_REPOSITORY makes rendering fail" "1" "$status"
+    checkMatches "an exported-but-empty GITHUB_REPOSITORY fails for the right reason" \
+        "repository not set" "$errOutput"
+
+    # An explicitly empty *argument* falls back to the environment too: `${1:-default}`, not
+    # `${1-default}`. With a hard-coded "" default the two forms agree everywhere exercised
+    # above, since an unset and an empty variable both resolve to the same "" either way -- this
+    # is the one case that actually tells them apart, passing "" as the run ID argument while
+    # RUN_ID is exported with a real value.
+    RUN_ID=$PRECEDENCE_ENV_RUN_ID \
+        "$SCRIPT_DIR/render-job.sh" "" "$PRECEDENCE_ARG_REPOSITORY" "$PRECEDENCE_ARG_ISSUE_NUMBER" \
+        >"$rendered"
+    check "an explicitly empty run ID argument falls back to the exported RUN_ID" \
+        "$PRECEDENCE_ENV_RUN_ID" "$(read_ "$rendered" '.metadata.labels."sandcastle.run"')"
+}
+
 main() {
     local workDir job numericJob
 
@@ -445,6 +535,7 @@ main() {
     checkCredentialWiring "$job"
     checkScalarTypes "$numericJob"
     checkNothingElseIsSet "$job"
+    checkArgumentPrecedence "$workDir"
 
     log "$PASSED assertions passed, $FAILED failed"
     [ "$FAILED" -eq 0 ] || exit 1

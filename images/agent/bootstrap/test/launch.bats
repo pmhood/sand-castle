@@ -622,7 +622,9 @@ nova|ghcr.io/pmhood/sandcastle-agent@sha256:000000000000000000000000000000000000
     # What Kubernetes actually said, under the heading that says so -- and nothing more, because
     # 128+4 is this script's reading and belongs in its own voice.
     assertContains "$output" 'reason Error, exit code 132'
-    # The blind spot itself: this run's output cannot explain a binary that never executed.
+    # The blind spot itself. The run's output is not silent here -- PID 1 is a shell, and it
+    # prints the job line naming the signal before exiting 128+4 -- but nothing in it is an
+    # agent failure: every §31 stage the bootstrap reports had succeeded.
     refuteContains "$output" 'FAILED at the agent layer'
 }
 

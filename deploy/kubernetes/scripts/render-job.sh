@@ -2,9 +2,18 @@
 # Renders job.yaml for one run (docs/ARCHITECTURE.md §19, §20, §36).
 #
 # job.yaml carries three `${...}` placeholders and nothing else that varies. This substitutes
-# them, validates each value first, and writes the result to stdout. It is the only renderer:
-# the README's manual Phase 2 flow, scripts/validate.sh and Phase 3's launcher (#21) all go
-# through it, so there is one answer to "what does an applied Job look like".
+# them, validates each value first, and writes the result to stdout. It is the only renderer on
+# this side: the README's manual Phase 2 flow, scripts/launch-run.sh and scripts/validate.sh all
+# go through it, so there is one answer to "what does an applied Job look like".
+#
+# It is no longer the only renderer in the repository. Phase 3's server builds the same manifest
+# in TypeScript (apps/server/src/kubernetes/job-builder.ts, #52), because a server that has to
+# submit a Job to the API server has no use for rendered YAML, and an operator with no server
+# running has no use for a TypeScript build. The two are kept honest by
+# apps/server/test/kubernetes/job-builder.test.ts, which runs *this script* and requires what it
+# prints to equal what the builder returns -- so a change to job.yaml that is not also made there
+# fails the server's test suite. Read that file's header for the decision and the plan to
+# converge; do not edit job.yaml on the assumption that it is still the only copy.
 #
 # Usage:
 #   ./deploy/kubernetes/scripts/render-job.sh <run-id> <owner/repo> <issue-number>

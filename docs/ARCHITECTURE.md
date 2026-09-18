@@ -200,6 +200,8 @@ Claude Code CLI
 19. Kubernetes Pod is eventually cleaned up
 ```
 
+Engram configuration and initialization (steps 7 and 9) are not implemented yet; §41 covers when they are added.
+
 Success means this sequence works repeatedly.
 
 ---
@@ -245,6 +247,8 @@ Kubernetes Secrets
 GitHub Webhooks
 Engram
 ```
+
+Engram is not part of the running system yet; §41 covers when it is added.
 
 ---
 

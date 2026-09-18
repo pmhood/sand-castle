@@ -1,0 +1,24 @@
+# Keeps the commit-SHA-pinned third-party actions under .github/workflows/ from going stale.
+#
+# Every `uses:` in this repo is pinned to a full commit SHA with the human-readable version in
+# a trailing comment (`uses: owner/repo@<40-char-sha>  # vX.Y.Z`), not a mutable tag -- see the
+# "Pin third-party GitHub Actions by commit SHA" issue for why. Dependabot understands that form:
+# when upstream tags a new version, it opens a PR here that updates the SHA and the version
+# comment together, so the pin never has to be bumped by hand for the common case.
+#
+# Manual update procedure (for when Dependabot is paused, or a PR needs to be pre-empted):
+#   1. Find the new tag's commit in the action's own repo, not a blog post or another project:
+#        gh api repos/<owner>/<repo>/git/ref/tags/<vX.Y.Z>
+#   2. If `.object.type` is `tag` (an annotated tag), that SHA names a tag object, not the
+#      commit -- dereference it:
+#        gh api repos/<owner>/<repo>/git/tags/<sha-from-step-1>
+#      and take *that* result's `.object.sha`. If `.object.type` is already `commit`, the SHA
+#      from step 1 is the one to use.
+#   3. Replace both the SHA and the trailing version comment on the `uses:` line. Never update
+#      one without the other -- a stale comment next to a fresh SHA is worse than no comment.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

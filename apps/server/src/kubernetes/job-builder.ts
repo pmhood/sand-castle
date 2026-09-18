@@ -59,7 +59,11 @@ const AGENT_IMAGE =
 // rejected by the API server at best and collides with the next empty one at worst.
 const RUN_ID_PATTERN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/
 const RUN_ID_MAX_LENGTH = 52
-const REPOSITORY_PATTERN = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/
+
+// Exported so src/api/test-runs.ts can reject a malformed `repository` in the same shape,
+// before the request reaches this file's own check -- one pattern, not two copies that could
+// drift the way #26 was filed over.
+export const REPOSITORY_PATTERN = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/
 
 /**
  * Rejects an input the manifest cannot carry, before it becomes a Job the API server refuses or

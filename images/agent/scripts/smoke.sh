@@ -75,9 +75,14 @@ generateRunId() {
 
 # Locate the credential file. This file is git-ignored and contains credentials as KEY=VALUE
 # pairs, one per line. Only variables that the selected agent needs are read.
+#
+# SANDCASTLE_ENV_FILE overrides the default path (#16): an operator with more than one
+# credential set can point at whichever file they mean, the same way
+# deploy/kubernetes/scripts/create-secrets.sh already reads this exact file (images/.env.local)
+# through the same variable. Its default is unchanged.
 locateCredentialFile() {
     local candidate
-    candidate="$(dirname "$AGENT_DIR")/.env.local"
+    candidate="${SANDCASTLE_ENV_FILE:-$(dirname "$AGENT_DIR")/.env.local}"
     if [[ -f "$candidate" ]]; then
         CREDENTIAL_FILE="$candidate"
     fi

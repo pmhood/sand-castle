@@ -228,6 +228,86 @@ readonly MUTATIONS=(
     '.metadata.labels."pod-security.kubernetes.io/enforce" = "privileged"'
     'the namespace enforces the restricted Pod Security standard'
 
+    server-serviceaccount.yaml
+    '.metadata.name = "sandcastle-agent"'
+    'the server has its own ServiceAccount, distinct from the agent'"'"'s'
+
+    server-serviceaccount.yaml
+    '.metadata.namespace = "default"'
+    'the server ServiceAccount lives in sandcastle-agents'
+
+    server-role.yaml
+    '.kind = "ClusterRole"'
+    'the server RBAC is a namespaced Role, not a ClusterRole (§22 forbids cluster-admin)'
+
+    server-role.yaml
+    '.metadata.namespace = "default"'
+    'the server Role only grants within sandcastle-agents'
+
+    server-role.yaml
+    '.rules[0].verbs = ["create", "delete"]'
+    'the verb Phase 3 (§37) actually calls is exactly create, not wider'
+
+    server-role.yaml
+    '.rules[1].verbs = ["get", "list", "watch", "delete", "update"]'
+    'the job verbs granted ahead of use are exactly §22'"'"'s get/list/watch/delete'
+
+    server-role.yaml
+    '.rules[2].resources = ["pods", "pods/exec"]'
+    'pods/exec is not granted -- §22 defers it'
+
+    server-role.yaml
+    '.rules[3].resources = ["pods/log", "pods/exec"]'
+    'pods/exec is not granted through the pod-logs rule either'
+
+    server-role.yaml
+    '.rules[0].verbs = ["*"]'
+    'no rule grants a wildcard verb'
+
+    server-role.yaml
+    '.rules[2].resources = ["*"]'
+    'no rule grants a wildcard resource'
+
+    server-role.yaml
+    '.rules[2].apiGroups = ["*"]'
+    'no rule grants a wildcard API group'
+
+    server-role.yaml
+    '.rules += [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}]'
+    'the Role grants no rule beyond the four §22 asks for'
+
+    server-rolebinding.yaml
+    '.kind = "ClusterRoleBinding"'
+    'the server binding is a RoleBinding, not a ClusterRoleBinding'
+
+    server-rolebinding.yaml
+    '.metadata.namespace = "default"'
+    'the server binding only exists in sandcastle-agents'
+
+    server-rolebinding.yaml
+    '.roleRef.kind = "ClusterRole"'
+    'the server binding points at a Role, not a ClusterRole'
+
+    server-rolebinding.yaml
+    '.roleRef.name = "sandcastle-agent"'
+    'the server binding points at the server Role, not some other one'
+
+    server-rolebinding.yaml
+    '.subjects[0].name = "sandcastle-agent"'
+    'the server binding'"'"'s subject is the server ServiceAccount, not the agent'"'"'s'
+
+    server-rolebinding.yaml
+    '.subjects[0].namespace = "sandcastle-system"'
+    'the server binding'"'"'s subject namespace is sandcastle-agents, not left to default elsewhere'
+
+    server-rolebinding.yaml
+    '.subjects[0].kind = "User"'
+    'the server binding'"'"'s subject is a ServiceAccount, not a User or Group'
+
+    server-rolebinding.yaml
+    '.subjects += [{"kind": "ServiceAccount", "name": "sandcastle-agent", "namespace": "sandcastle-agents"}]'
+    'the server binding grants exactly one subject'
+
     job.yaml
     '---
 apiVersion: v1

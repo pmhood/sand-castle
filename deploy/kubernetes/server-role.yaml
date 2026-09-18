@@ -1,0 +1,55 @@
+# What the Sand Castle server may do in the agent namespace (docs/ARCHITECTURE.md §22, §37).
+#
+# Namespaced Role, not ClusterRole: §22 says "do not grant cluster-admin", and a cluster-scoped
+# object would authorize the server in every namespace the cluster has, not only this one --
+# the opposite of the minimum §22 asks for. server-rolebinding.yaml is what confines it to
+# sandcastle-agents; being a Role rather than a ClusterRole is what makes that binding possible
+# to write at all.
+#
+# Three files rather than one for this identity (ServiceAccount, Role, RoleBinding), matching
+# how the rest of this directory is laid out: namespace.yaml, serviceaccount.yaml and job.yaml
+# are each one kind. validate.sh also asserts that every manifest here holds exactly one
+# document, so that a second object can never ride along inside a file unexamined (see its
+# header); a combined file would have meant weakening that guarantee instead of extending it
+# for one identity's three objects. Apply order among these three does not matter -- a
+# ServiceAccount, a Role and a RoleBinding can each be created before or after the others exist
+# -- so nothing is lost by keeping them apart; README.md ("Running one") has the full command.
+#
+# §22's list, minus pods/exec: §22 defers that to when the server needs a shell into a running
+# Pod, and granting it now would be exactly the "convenient but unjustified" grant this issue
+# warns against.
+#
+# Two rules per resource rather than one flat list, so an auditor can see what Phase 3 (§37:
+# "the backend creates the Kubernetes Job") actually calls, separately from what is granted
+# ahead of use. §22 permits granting the whole list in one reviewed change rather than five; it
+# does not permit hiding which verbs are live behind an undifferentiated grant.
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: sandcastle-server
+  namespace: sandcastle-agents
+  labels:
+    app: sandcastle
+rules:
+  # In use today: §37's POST /api/test-runs creates one Job per run. Nothing in this
+  # repository yet reads a Job or a Pod back.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create"]
+
+  # Granted ahead of use. §38 (Phase 4, observing a run) is what first watches a Job, reads its
+  # Pods and streams their logs, and §47's cleanup is what first deletes one; none of that code
+  # exists yet.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "delete"]
+
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # "get pod logs" (§22) is the pods/log subresource, not a verb on pods -- get/list/watch on
+  # pods above says nothing about being able to read what one printed.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]

@@ -43,8 +43,12 @@ readonly PROBE_SCRIPT="./deploy/kubernetes/scripts/probe-nodes.sh"
 # sysexits(3) values, so that a run that never happened is distinguishable from an agent that
 # ran and failed: an agent failure exits with the *container's* own status, which is small and
 # ordinary. The message is the authority either way; the code is for whatever wraps this.
+#
+# "The agent's own status" means a status the run chose. A container killed by a signal leaves
+# 128+n, which is a number the kernel picked and not a result (#31), so those exit EXIT_CLUSTER
+# like every other thing that happened *to* a run.
 readonly EXIT_USAGE=64    # EX_USAGE: the arguments are wrong
-readonly EXIT_CLUSTER=69  # EX_UNAVAILABLE: the run never ran, or the cluster ended it
+readonly EXIT_CLUSTER=69  # EX_UNAVAILABLE: the run never ran, or something other than the agent ended it
 
 # How long to wait before giving up and saying why. It bounds *each* of the two waits that
 # precede the logs -- the Job producing a Pod, and that Pod's container starting -- so a run that
@@ -93,7 +97,7 @@ This script takes no credential and accepts none: the run reads its credentials 
 Secrets deploy/kubernetes/scripts/create-secrets.sh creates.
 
 Exit status: 0 the agent succeeded, $EXIT_USAGE the arguments are wrong, $EXIT_CLUSTER the run never ran
-or the cluster ended it, anything else the agent's own exit code.
+or something other than the agent ended it, anything else the agent's own exit code.
 EOF
 }
 
@@ -368,11 +372,17 @@ podName() {
 # and `read` would then drop whatever came after it. Only one of the three messages is ever
 # set, so joining them loses nothing.
 #
+# `terminated.signal` and `spec.nodeName` are here for #31. The first is Kubernetes saying that
+# a signal ended the container rather than the container choosing a status -- see
+# terminationSignal below for what to do when, as on this cluster, no runtime fills it in. The
+# second is the single most useful fact about a run that died of what the node is: "SIGILL on
+# node nova" points at the node, "exited 132" points at nothing.
+#
 # The `|` between the fields is $FIELD_SEPARATOR, spelled out because a jsonpath is one fixed
 # string and interpolating a shell variable through its quoting would cost more than it saves.
 # Both this query and schedulingFacts below have to be changed with the constant if it changes.
 podFacts() {
-    kubectl --namespace "$NAMESPACE" get pod "$POD_NAME" -o jsonpath='{.status.phase}{"|"}{.status.reason}{"|"}{.status.containerStatuses[*].state.waiting.reason}{"|"}{.status.containerStatuses[*].state.running.startedAt}{"|"}{.status.containerStatuses[*].state.terminated.reason}{"|"}{.status.containerStatuses[*].state.terminated.exitCode}{"|"}{.status.containerStatuses[*].state.waiting.message}{.status.containerStatuses[*].state.terminated.message}{.status.message}' 2>/dev/null || true
+    kubectl --namespace "$NAMESPACE" get pod "$POD_NAME" -o jsonpath='{.status.phase}{"|"}{.status.reason}{"|"}{.status.containerStatuses[*].state.waiting.reason}{"|"}{.status.containerStatuses[*].state.running.startedAt}{"|"}{.status.containerStatuses[*].state.terminated.reason}{"|"}{.status.containerStatuses[*].state.terminated.exitCode}{"|"}{.status.containerStatuses[*].state.terminated.signal}{"|"}{.spec.nodeName}{"|"}{.status.containerStatuses[*].state.waiting.message}{.status.containerStatuses[*].state.terminated.message}{.status.message}' 2>/dev/null || true
 }
 
 schedulingFacts() {
@@ -542,14 +552,14 @@ reportScheduling() {
 # logs can be followed, and 1 when the Pod is gone -- which is what the Job controller does to
 # a run that exceeds its deadline. Either way reportOutcome has the last word on the result.
 waitForContainer() {
-    local deadline facts phase podReason waiting startedAt termReason termExit message
+    local deadline facts phase podReason waiting startedAt termReason termExit termSignal node message
     deadline=$(($(date +%s) + START_TIMEOUT))
 
     while :; do
         facts=$(podFacts)
         [ -n "$facts" ] || return 1
 
-        IFS=$FIELD_SEPARATOR read -r phase podReason waiting startedAt termReason termExit message <<<"$facts"
+        IFS=$FIELD_SEPARATOR read -r phase podReason waiting startedAt termReason termExit termSignal node message <<<"$facts"
         classifyWaiting "$waiting" "$message"
 
         [ -z "$startedAt" ] || {
@@ -586,6 +596,116 @@ followLogs() {
     log ""
 }
 
+# The signal that ended a terminated container, or nothing if none did (#31).
+#
+# Two sources, in this order, because they are not the same quality of evidence.
+# `state.terminated.signal` is Kubernetes saying outright that a signal ended the container:
+# where a runtime fills it in there is nothing to infer, and an exit code that merely *looks*
+# like a signal cannot be mistaken for one. Nothing on this cluster fills it in -- containerd's
+# CRI reports `reason` and `exitCode` and no signal at all, which was confirmed by killing a
+# container's own PID 1 with SIGILL on `nova` and reading back a status identical, field for
+# field, to a container that ran `exit 132`.
+#
+# So the second source is the 128+n convention, and it is what this repository's own failures
+# actually produce: the container's PID 1 is the bootstrap, a shell, and a shell whose child is
+# killed by signal n exits 128+n itself. The run #31 was filed for is exactly that -- `claude`
+# died of SIGILL, bash reported 132, and nothing in the Pod's status said the word "signal".
+# What the two readings do not share is certainty, so signalEvidence says which one was used.
+terminationSignal() {
+    local exitCode=$1 reported=$2
+
+    if [ -n "$reported" ] && [ "$reported" != 0 ]; then
+        printf '%s' "$reported"
+        return 0
+    fi
+    # 129-159: the signals a process can die of, offset by the 128 the convention adds.
+    case $exitCode in
+        129 | 1[3-5][0-9]) printf '%s' "$((exitCode - 128))" ;;
+    esac
+}
+
+# The six signals #31 names, plus SIGTERM because it is the likeliest seventh. Anything else
+# keeps its number: a signal nobody anticipated should still be classified as a signal, and
+# "signal 30" read back to an operator is worth more than a table that quietly did not match.
+signalName() {
+    case $1 in
+        4) printf 'SIGILL' ;;
+        6) printf 'SIGABRT' ;;
+        7) printf 'SIGBUS' ;;
+        8) printf 'SIGFPE' ;;
+        9) printf 'SIGKILL' ;;
+        11) printf 'SIGSEGV' ;;
+        15) printf 'SIGTERM' ;;
+        *) printf 'signal %s' "$1" ;;
+    esac
+}
+
+# Which of terminationSignal's two readings produced the answer, in the launcher's own voice.
+# It goes in the summary rather than under `fail`'s "Kubernetes said", which is for what
+# Kubernetes said and not for what this script worked out from it.
+signalEvidence() {
+    local exitCode=$1 reported=$2
+
+    if [ -n "$reported" ] && [ "$reported" != 0 ]; then
+        printf 'the container reported signal %s' "$reported"
+    else
+        printf 'exit %s is 128+%s, and no signal was reported' "$exitCode" "$((exitCode - 128))"
+    fi
+}
+
+# What a signal death means, and where to send the operator. Returns without a word if the
+# container was not signalled at all, which is the ordinary agent failure reportOutcome handles.
+#
+# Three branches for seven signals, because the grouping is the useful part and a branch per
+# signal would be a table of synonyms. What separates them is where the answer *is*:
+#
+#   SIGILL      the node. The binary is fine everywhere it was built for; this CPU lacks an
+#               instruction it uses, which is #30 exactly, and #30's probe is the remedy.
+#   SIGSEGV     the run. Each is a fault or an assertion inside the process -- a bad address, a
+#   SIGABRT     bad mapping, a division, a library giving up -- and for every one of them the
+#   SIGBUS      evidence is the run's own output, and the node is not implicated. They share a
+#   SIGFPE      message and each prints its own name, which is the distinction worth keeping.
+#   everything  outside the run. A process does not SIGKILL or SIGTERM itself by accident, so
+#   else        something ended it; OOM is the usual cause and is *already* reported above from
+#               `reason: OOMKilled`, which is why reaching here means the kubelet did not say
+#               OOM. An unnamed signal lands here too rather than in the branch that would tell
+#               an operator to go and re-probe their nodes over something else entirely.
+#
+# The summary is the one line that gets read, so it says the three facts an operator acts on --
+# which signal, which node, and how it was known -- and the branch's reasoning goes in the Fix.
+failIfSignalled() {
+    local exitCode=$1 reported=$2 node=$3 termReason=$4 signal name summary detail
+
+    signal=$(terminationSignal "$exitCode" "$reported")
+    [ -n "$signal" ] || return 0
+
+    name=$(signalName "$signal")
+    # A terminated container has always been on a node; the fallback is for a status so
+    # truncated that saying "node " with nothing after it would be worse than admitting it.
+    [ -n "$node" ] || node="(not recorded)"
+    summary="$name killed the run on node $node ($(signalEvidence "$exitCode" "$reported"))"
+    detail="terminated: reason ${termReason:-none}, exit code $exitCode"
+    [ -z "$reported" ] || [ "$reported" = 0 ] || detail="$detail, signal $reported"
+
+    case $signal in
+        4)
+            fail node "$summary" \
+                "node $node cannot execute this build of the agent binary -- SIGILL is an instruction its CPU does not have (#30). $PROBE_SCRIPT runs \`$AGENT --version\` from job.yaml's image on each node and labels what happened, so a node the binary dies on ends up $CAPABILITY_LABEL=false and takes no run (deploy/kubernetes/README.md, \"Which nodes can run the agent\")" \
+                "$detail"
+            ;;
+        6 | 7 | 8 | 11)
+            fail runtime "$summary" \
+                "the process faulted rather than choosing to exit, which is a crash inside the run and says nothing about the node: the run's own output above stops where it happened (§31 prefixes say which stage)" \
+                "$detail"
+            ;;
+        *)
+            fail runtime "$summary" \
+                "something outside the process ended it, and the kubelet did not report it as OOMKilled: kubectl -n $NAMESPACE describe pod $POD_NAME, and check node $node for memory or disk pressure (§23 sets this run's limits)" \
+                "$detail"
+            ;;
+    esac
+}
+
 reportSuccess() {
     log "Run $RUN_ID PASSED: the agent exited 0"
     log "  Repository: $GITHUB_REPOSITORY, issue #$GITHUB_ISSUE_NUMBER, agent $AGENT"
@@ -599,7 +719,7 @@ reportSuccess() {
 # behind -- the deadline, and an eviction the controller has already reaped -- are only
 # recorded there.
 reportOutcome() {
-    local deadline conditions facts phase podReason waiting startedAt termReason termExit message
+    local deadline conditions facts phase podReason waiting startedAt termReason termExit termSignal node message
     deadline=$(($(date +%s) + FINISH_TIMEOUT))
 
     while :; do
@@ -608,7 +728,7 @@ reportOutcome() {
 
         facts=$(podFacts)
         if [ -n "$facts" ]; then
-            IFS=$FIELD_SEPARATOR read -r phase podReason waiting startedAt termReason termExit message <<<"$facts"
+            IFS=$FIELD_SEPARATOR read -r phase podReason waiting startedAt termReason termExit termSignal node message <<<"$facts"
 
             [ "$podReason" != Evicted ] ||
                 fail scheduling "the node evicted the Pod" \
@@ -635,11 +755,22 @@ reportOutcome() {
                     # the run is a failure of unknown size rather than a success.
                     termExit=${termExit:-1}
                     [ "$termExit" != 0 ] || reportSuccess
+
+                    # `reason: Error` covers both a run that failed and a run that was killed,
+                    # and they are not the same failure (#31). This returns for the first.
+                    failIfSignalled "$termExit" "$termSignal" "$node" "$termReason"
+
                     # The one failure that is the agent's own. Everything above this line
                     # happened to the run; this one happened inside it.
+                    #
+                    # It used to say "the container ran, so this is not a cluster problem",
+                    # which was a negative asserted from the wrong premise: a container can
+                    # start and still be on hardware that cannot execute it, and every signal
+                    # death was in that gap. What is left is the positive fact -- the run chose
+                    # this status -- and it is said only now that a signal cannot reach here.
                     log ""
                     log "FAILED at the agent layer: the run started and exited $termExit"
-                    log "  The container ran, so this is not a cluster problem: the cause is in"
+                    log "  No signal ended it, so the run chose that status: the cause is in"
                     log "  the run's own output above (§31 prefixes say which stage)."
                     reportWhereTheRunIs
                     exit "$termExit"

@@ -40,38 +40,79 @@ readonly JOB_NAME="sandcastle-$RUN_ID"
 readonly POD_NAME="$JOB_NAME-abcde"
 
 # What `kubectl get pod` reports, in the order and with the separator launch-run.sh asks for:
-# phase|status.reason|waiting.reason|running.startedAt|terminated.reason|terminated.exitCode|message
+# phase|status.reason|waiting.reason|running.startedAt|terminated.reason|terminated.exitCode|
+# terminated.signal|spec.nodeName|message
+#
+# The last two fields are #31's. They are empty in every fixture recorded before the launcher
+# asked for them, which is what an unread field looks like rather than what that Pod carried: a
+# terminated Pod always has a `spec.nodeName`. The signal-death fixtures further down were
+# recorded after, and carry both.
 #
 # Verbatim.
-readonly FACTS_PULLING='Pending||ContainerCreating||||'
-readonly FACTS_AGENT_FAILED='Failed||||Error|3|'
-readonly FACTS_OOM='Failed||||OOMKilled|137|'
-readonly FACTS_START_ERROR='Failed||||StartError|128|failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: exec: "/no/such/binary": stat /no/such/binary: no such file or directory'
-readonly FACTS_UNSCHEDULED='Pending||||||'
+readonly FACTS_PULLING='Pending||ContainerCreating||||||'
+readonly FACTS_AGENT_FAILED='Failed||||Error|3|||'
+readonly FACTS_OOM='Failed||||OOMKilled|137|||'
+readonly FACTS_START_ERROR='Failed||||StartError|128|||failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: exec: "/no/such/binary": stat /no/such/binary: no such file or directory'
+readonly FACTS_UNSCHEDULED='Pending||||||||'
 
 # Constructed. A container that is running reports `running.startedAt` and nothing else, but the
 # timestamp is a plausible one rather than a read-back value.
-readonly FACTS_RUNNING='Running|||2026-09-17T02:14:41Z|||'
+readonly FACTS_RUNNING='Running|||2026-09-17T02:14:41Z|||||'
 # Constructed: no run on this cluster has succeeded, because succeeding needs a real credential.
 # That run is the repo owner's acceptance test (deploy/kubernetes/README.md).
-readonly FACTS_SUCCEEDED='Succeeded||||Completed|0|'
+readonly FACTS_SUCCEEDED='Succeeded||||Completed|0|||'
 # Constructed: eviction needs a node under real resource pressure, which was not worth producing
 # on someone's cluster. `status.reason` and `status.message` are where the kubelet puts it.
-readonly FACTS_EVICTED='Failed|Evicted|||||The node was low on resource: ephemeral-storage.'
+readonly FACTS_EVICTED='Failed|Evicted|||||||The node was low on resource: ephemeral-storage.'
 
 # Verbatim.
-readonly FACTS_IMAGE_MISSING='Pending||ErrImagePull||||rpc error: code = NotFound desc = failed to pull and unpack image "ghcr.io/pmhood/sandcastle-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000": failed to resolve reference "ghcr.io/pmhood/sandcastle-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000": ghcr.io/pmhood/sandcastle-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000: not found'
+readonly FACTS_IMAGE_MISSING='Pending||ErrImagePull||||||rpc error: code = NotFound desc = failed to pull and unpack image "ghcr.io/pmhood/sandcastle-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000": failed to resolve reference "ghcr.io/pmhood/sandcastle-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000": ghcr.io/pmhood/sandcastle-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000: not found'
 # Verbatim. The architecture mismatch also ends in "not found", which is why its own test exists.
-readonly FACTS_WRONG_ARCH='Pending||ErrImagePull||||rpc error: code = NotFound desc = failed to pull and unpack image "docker.io/arm64v8/alpine:3.20": no match for platform in manifest: not found'
+readonly FACTS_WRONG_ARCH='Pending||ErrImagePull||||||rpc error: code = NotFound desc = failed to pull and unpack image "docker.io/arm64v8/alpine:3.20": no match for platform in manifest: not found'
 # Recorded and transposed: the probe pulled ghcr.io/pmhood/sandcastle-no-such-package, and the
 # package name is replaced throughout -- including inside the token URL's scope -- by the one
 # whose privacy would actually cause this (#18's GHCR package is meant to be public).
-readonly FACTS_REGISTRY_DENIED='Pending||ErrImagePull||||failed to pull and unpack image "ghcr.io/pmhood/sandcastle-agent:latest": failed to resolve reference "ghcr.io/pmhood/sandcastle-agent:latest": failed to authorize: failed to fetch anonymous token: unexpected status from GET request to https://ghcr.io/token?scope=repository%3Apmhood%2Fsandcastle-agent%3Apull&service=ghcr.io: 403 Forbidden'
+readonly FACTS_REGISTRY_DENIED='Pending||ErrImagePull||||||failed to pull and unpack image "ghcr.io/pmhood/sandcastle-agent:latest": failed to resolve reference "ghcr.io/pmhood/sandcastle-agent:latest": failed to authorize: failed to fetch anonymous token: unexpected status from GET request to https://ghcr.io/token?scope=repository%3Apmhood%2Fsandcastle-agent%3Apull&service=ghcr.io: 403 Forbidden'
 # Verbatim: this one was induced through the launcher itself, against the real Secret.
-readonly FACTS_BAD_SECRET_KEY='Pending||CreateContainerConfigError||||couldn'"'"'t find key tokenn in Secret sandcastle-agents/sandcastle-github-token'
+readonly FACTS_BAD_SECRET_KEY='Pending||CreateContainerConfigError||||||couldn'"'"'t find key tokenn in Secret sandcastle-agents/sandcastle-github-token'
 # Recorded and transposed: the probe deleted sandcastle-github-token; the other Secret is named
 # here so the two credentials-layer fixtures are not both about the same one.
-readonly FACTS_SECRET_MISSING='Pending||CreateContainerConfigError||||secret "sandcastle-claude-oauth" not found'
+readonly FACTS_SECRET_MISSING='Pending||CreateContainerConfigError||||||secret "sandcastle-claude-oauth" not found'
+
+# The signal deaths (#31). Every one of these was read back from a Pod on the k3s cluster, and
+# the first is the run the issue was filed for.
+#
+# Verbatim, from the repo owner's own failed Phase 2 run -- job sandcastle-run-20260918-003624-fa2cba,
+# still in the namespace, which died on `nova` because the agent binary needs AVX2 and that CPU
+# does not have it (#30). Note what is *not* in it: `terminated.signal` is empty and
+# `terminated.reason` is the same `Error` an ordinary failure carries. The container was not
+# itself signalled -- its PID 1 is the bootstrap, a shell, and the shell propagated the 132 its
+# `claude` child died with, which is the shape every signal death takes in this image.
+readonly FACTS_SIGILL='Failed||||Error|132||nova|'
+# Verbatim, induced on `red` by a container whose child really was killed by that signal
+# (`node -e 'process.kill(process.pid, "SIG...")'`), so PID 1 propagated 128+n exactly as the
+# owner's run did. Four signals, one recording each, because they share a branch and the branch
+# has to be shown naming each of them.
+readonly FACTS_SIGSEGV='Failed||||Error|139||red|'
+readonly FACTS_SIGABRT='Failed||||Error|134||red|'
+readonly FACTS_SIGBUS='Failed||||Error|135||red|'
+readonly FACTS_SIGFPE='Failed||||Error|136||red|'
+# Verbatim, the same way. `reason` is `Error` and not `OOMKilled`: this is what a SIGKILL that
+# the kubelet did not attribute to memory looks like, and it is why the OOM branch above cannot
+# be the whole answer for 137.
+readonly FACTS_SIGKILL='Failed||||Error|137||red|'
+# Verbatim, from a container that ran `exit 132` of its own accord on `red`. It is identical to
+# FACTS_SIGILL but for the node name, which is the point: on this runtime the API cannot tell
+# the two apart, so the launcher says which evidence it read rather than pretending it can.
+readonly FACTS_EXIT_132_BY_CHOICE='Failed||||Error|132||red|'
+# Constructed, and the only fixture here that is: no runtime on this cluster fills in
+# `state.terminated.signal`. That was not assumed -- a container's own PID 1 was killed by SIGILL
+# on `nova` and reported `reason: Error, exitCode: 132` and no signal, field for field the same
+# as `exit 132`. The field is Kubernetes API v1 and other runtimes do set it, and where it is
+# set it is the authority: this one says signal 11 beside an exit code of 132, so a launcher
+# that read the number would answer SIGILL and one that reads what Kubernetes reported answers
+# SIGSEGV.
+readonly FACTS_REPORTED_SIGNAL_DISAGREES='Failed||||Error|132|11|red|'
 
 # `{PodScheduled.reason}|{PodScheduled.message}`. Both verbatim -- including the scheduled case,
 # which carries *no* reason and no message: the condition is `status: "True"` and nothing else,
@@ -556,7 +597,120 @@ nova|ghcr.io/pmhood/sandcastle-agent@sha256:000000000000000000000000000000000000
     assertContains "$output" 'BackoffLimitExceeded'
 }
 
-# --- the agent's own failure, which is the one that is *not* a cluster problem ---------------
+# --- signal deaths (#31) ---------------------------------------------------------------------
+#
+# A container killed by a signal is not an agent that failed, and the run this repository lost is
+# the proof: it cloned, read the issue, started the CLI, and died of SIGILL on a node whose CPU
+# cannot run the binary. The launcher called that the agent layer and added that it was "not a
+# cluster problem" -- two sentences, both wrong, both confident.
+#
+# Every fragment below is a substring test, and these messages are close siblings of each other,
+# so each test also refutes what the neighbouring branches would have said. Collapsing any two of
+# the three branches has to make one of these fail.
+
+@test "the SIGILL that #31 was filed for is the node layer, names nova, and points at the probe" {
+    # #31's cluster exactly: a node labelled capable, against this very image, that is not.
+    state capableNodes "nova|$(awk '$1 == "image:" { print $2; exit }' "$JOB_MANIFEST")"
+    givenPod "$FACTS_SIGILL"
+    state logs '[CLAUDE] Starting Claude Code CLI in /workspace/repo'
+
+    runLaunch octo/demo 7
+    # Not 132: a number the kernel chose is not a result the agent returned.
+    [ "$status" -eq 69 ]
+    assertLineContains "$output" 'FAILED at the node layer' 'SIGILL killed the run on node nova'
+    assertContains "$output" 'probe-nodes.sh' 'sandcastle.dev/agent-capable=false'
+    # What Kubernetes actually said, under the heading that says so -- and nothing more, because
+    # 128+4 is this script's reading and belongs in its own voice.
+    assertContains "$output" 'reason Error, exit code 132'
+    # The blind spot itself: this run's output cannot explain a binary that never executed.
+    refuteContains "$output" 'FAILED at the agent layer'
+}
+
+@test "a SIGSEGV is a crash in the run, not a node that cannot execute it" {
+    givenPod "$FACTS_SIGSEGV"
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 69 ]
+    assertLineContains "$output" 'FAILED at the runtime layer' 'SIGSEGV killed the run on node red'
+    assertContains "$output" 'faulted rather than choosing to exit'
+    # The SIGILL branch would send an operator to re-probe nodes over a crash that says nothing
+    # about the node; the SIGKILL branch would send them looking for a kill that did not happen.
+    refuteContains "$output" 'probe-nodes.sh' 'cannot execute this build' 'OOMKilled'
+    refuteContains "$output" 'FAILED at the agent layer'
+}
+
+@test "a SIGABRT shares the crash branch and still names itself" {
+    givenPod "$FACTS_SIGABRT"
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 69 ]
+    assertLineContains "$output" 'FAILED at the runtime layer' 'SIGABRT killed the run on node red'
+    assertContains "$output" 'faulted rather than choosing to exit'
+    refuteContains "$output" 'SIGSEGV' 'probe-nodes.sh'
+}
+
+@test "a SIGBUS shares the crash branch and still names itself" {
+    givenPod "$FACTS_SIGBUS"
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 69 ]
+    assertLineContains "$output" 'FAILED at the runtime layer' 'SIGBUS killed the run on node red'
+    assertContains "$output" 'faulted rather than choosing to exit'
+    refuteContains "$output" 'SIGSEGV' 'probe-nodes.sh'
+}
+
+@test "a SIGFPE shares the crash branch and still names itself" {
+    givenPod "$FACTS_SIGFPE"
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 69 ]
+    assertLineContains "$output" 'FAILED at the runtime layer' 'SIGFPE killed the run on node red'
+    assertContains "$output" 'faulted rather than choosing to exit'
+    refuteContains "$output" 'SIGSEGV' 'probe-nodes.sh'
+}
+
+# 137 keeps the OOM answer it had, which is matched from `reason: OOMKilled` above. This is the
+# other 137: a kill the kubelet attributed to nothing, which used to read as an agent failure.
+@test "a SIGKILL the kubelet did not call OOM is not an OOM, a crash, or the agent" {
+    givenPod "$FACTS_SIGKILL"
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 69 ]
+    assertLineContains "$output" 'FAILED at the runtime layer' 'SIGKILL killed the run on node red'
+    assertContains "$output" 'did not report it as OOMKilled' 'describe pod'
+    # "Raise the memory limit" is the OOM branch's answer and would be a guess here; "it
+    # faulted" is the crash branch's and would be wrong -- nothing faults on a SIGKILL.
+    refuteContains "$output" 'exceeded its memory limit' 'faulted rather than choosing to exit'
+    refuteContains "$output" 'FAILED at the agent layer'
+}
+
+@test "a signal Kubernetes reports decides the branch, not an exit code that looks like one" {
+    givenPod "$FACTS_REPORTED_SIGNAL_DISAGREES"
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 69 ]
+    # The exit code is 132, which is 128+4; the reported signal is 11. The report wins.
+    assertLineContains "$output" 'FAILED at the runtime layer' 'SIGSEGV killed the run' 'the container reported signal 11'
+    assertContains "$output" 'exit code 132, signal 11'
+    refuteContains "$output" 'SIGILL' 'FAILED at the node layer' '128+'
+}
+
+# The limit of the above, stated rather than hidden. containerd reports no signal at all, so a
+# container that chose to `exit 132` and one killed by SIGILL are the same Pod status field for
+# field -- the two fixtures differ only in the node name. The launcher reads the convention,
+# which is right for every 128+n this image can produce (its PID 1 is a shell), and says in the
+# message which evidence that was, so the reading can be disagreed with.
+@test "an exit code read as a signal says that is what it did" {
+    givenPod "$FACTS_EXIT_132_BY_CHOICE"
+
+    runLaunch octo/demo 7
+    [ "$status" -eq 69 ]
+    assertLineContains "$output" 'FAILED at the node layer' 'SIGILL killed the run on node red' \
+        'exit 132 is 128+4, and no signal was reported'
+    refuteContains "$output" 'the container reported signal'
+}
+
+# --- the agent's own failure, which is the one the run itself chose --------------------------
 
 @test "an agent that exits non-zero exits with its code and is named as the agent layer" {
     givenPod "$FACTS_AGENT_FAILED"
@@ -567,8 +721,11 @@ nova|ghcr.io/pmhood/sandcastle-agent@sha256:000000000000000000000000000000000000
     [ "$status" -eq 3 ]
     assertLineContains "$output" 'FAILED at the agent layer' 'exited 3'
     assertContains "$output" '[SANDCASTLE] Clone of octo/demo failed'
-    # Every other failure in this file says which cluster layer broke. This one says it did not.
-    assertContains "$output" 'not a cluster problem'
+    # Every other failure in this file says which cluster layer broke. This one says the run
+    # chose its status -- which is a claim about this exit code, and no longer a claim that the
+    # cluster is fine because the container ran (#31).
+    assertContains "$output" 'No signal ended it, so the run chose that status'
+    refuteContains "$output" 'FAILED at the node layer' 'FAILED at the runtime layer'
 }
 
 @test "launch-run.sh is valid bash syntax" {

@@ -1,0 +1,24 @@
+{
+  "name": "@sandcastle/server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Sand Castle API and orchestration service (docs/ARCHITECTURE.md §5)",
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "lint": "eslint .",
+    "test": "node --test 'test/**/*.test.ts'",
+    "start": "node dist/src/main.js"
+  },
+  "dependencies": {
+    "fastify": "5.12.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.13.5",
+    "eslint": "10.10.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.70.0"
+  }
+}

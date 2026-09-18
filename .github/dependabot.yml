@@ -1,4 +1,7 @@
-# Keeps the commit-SHA-pinned third-party actions under .github/workflows/ from going stale.
+# Keeps this repository's pinned dependencies from going stale: the commit-SHA-pinned third-party
+# actions under .github/workflows/, and the exactly-pinned npm packages under apps/server/.
+#
+# ## GitHub Actions
 #
 # Every `uses:` in this repo is pinned to a full commit SHA with the human-readable version in
 # a trailing comment (`uses: owner/repo@<40-char-sha>  # vX.Y.Z`), not a mutable tag -- see the
@@ -16,9 +19,31 @@
 #      from step 1 is the one to use.
 #   3. Replace both the SHA and the trailing version comment on the `uses:` line. Never update
 #      one without the other -- a stale comment next to a fresh SHA is worse than no comment.
+#
+# ## npm (apps/server)
+#
+# apps/server/package.json names every dependency as an exact version, never a range, and
+# apps/server/.npmrc sets `save-exact=true` so a later `npm install` cannot reintroduce one.
+# That makes Dependabot the update path rather than a convenience: it opens one pull request per
+# package, rewriting the exact version and package-lock.json together, and the `Server` workflow
+# decides whether it merges.
+#
+# Manual update procedure, for the same exceptional cases as above:
+#   cd apps/server && npm install <package>@<version>       # .npmrc makes this write an exact pin
+# then commit package.json and package-lock.json in the same change; a lockfile that disagrees
+# with the manifest is what `npm ci` exists to refuse.
+#
+# Node itself is not a Dependabot dependency. Its version lives in apps/server/.nvmrc, read by
+# both CI and `nvm use`, and is bumped deliberately -- the same treatment images/agent/Dockerfile
+# gives its base image and its CLI pins.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "npm"
+    directory: "/apps/server"
     schedule:
       interval: "weekly"

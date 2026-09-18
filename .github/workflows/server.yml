@@ -1,0 +1,89 @@
+name: Server
+
+# No `paths:` filter on pull_request, for the reason spelled out in agent-image.yml and
+# kubernetes-manifests.yml: `main` is protected by required status checks, and GitHub blocks a
+# pull request on a required check that never reports -- a filtered-out job leaves the pull
+# request waiting forever rather than passing. A check meant to be required has to run on every
+# pull request. The push trigger is filtered, because nothing downstream of it depends on these
+# jobs; they exist to gate merges, and re-running them on an unrelated commit to `main` proves
+# nothing new.
+#
+# The job names carry a `server-` prefix on purpose. A required status check is identified by
+# its job name, not by the workflow it lives in, so a job called `build` or `test` here could
+# not be told apart from agent-image.yml's `build` and `test` in the branch protection
+# settings -- and a required check that the wrong workflow satisfies is no check at all.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/server/**"
+      - ".github/workflows/server.yml"
+
+jobs:
+  server-lint:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned by commit SHA, not the mutable major tag -- see .github/dependabot.yml for why
+      # and how the pin gets updated.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          # One place names the Node version, and a developer's `nvm use` reads the same file.
+          node-version-file: apps/server/.nvmrc
+          cache: npm
+          cache-dependency-path: apps/server/package-lock.json
+
+      - name: Run eslint
+        run: make -C apps/server lint
+
+  server-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version-file: apps/server/.nvmrc
+          cache: npm
+          cache-dependency-path: apps/server/package-lock.json
+
+      - name: Run the server test suite
+        run: make -C apps/server test
+
+  server-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version-file: apps/server/.nvmrc
+          cache: npm
+          cache-dependency-path: apps/server/package-lock.json
+
+      - name: Compile to dist/
+        run: make -C apps/server build
+
+      # The build is only worth gating on if what it produced runs. A `tsc` that emits a dist/
+      # nothing can start is a green check over a broken artifact.
+      - name: The compiled server answers /health
+        run: |
+          set -euo pipefail
+          PORT=3000 node apps/server/dist/src/main.js &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          body=$(curl -fsS http://127.0.0.1:3000/health)
+          if [ "$body" != '{"status":"ok"}' ]; then
+            echo "the compiled server answered GET /health with: $body"
+            exit 1
+          fi
+          echo "$body"

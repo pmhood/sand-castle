@@ -9,6 +9,15 @@ The server's own identity and RBAC (§22) live here too, ahead of the server its
 them so #53 has something to submit a Job as, independently of the server's own code. See "The
 server's identity" below.
 
+Phase 3 (§37) starts a run from an HTTP request instead of from `launch-run.sh`, and that
+procedure is `docs/PHASE-3-RUNBOOK.md` — the prerequisites below, then the server, then `curl`,
+then these same `kubectl` commands. It leans on this file for everything cluster-side: the
+credentials, the node capability labels, and the "When a run fails" table, which is still the
+diagnosis when a run the server started does not run. Worth knowing from this side: the endpoint
+performs none of `launch-run.sh`'s preflight checks, so a mistake this launcher refuses before
+applying anything becomes a `201` and a Pod that never starts. The runbook's "The server has no
+preflight" sets out which.
+
 ```text
 deploy/kubernetes/
 ├── namespace.yaml               the sandcastle-agents namespace every run lives in (§21)

@@ -94,6 +94,12 @@ persisted here — no database row, no way to look the run back up by this endpo
 persistence, §38, Phase 4). This is `select credential, inject credential, launch, observe` (§52)
 and nothing past it.
 
+**To take this all the way to a running agent, follow `docs/PHASE-3-RUNBOOK.md`.** It is the
+operator's procedure for §37's whole chain — the cluster prerequisites this endpoint assumes but
+does not check, the request, watching the Job with `kubectl` (the only view there is), cleanup,
+and a record of what was observed the one time it was run for real. This section is the endpoint's
+contract; that document is how a run happens.
+
 **This route's name is temporary.** §37 names it `POST /api/test-runs`; §33's Initial API has no
 such route — it has `/api/runs` with `GET`, `GET /:id`, `.../logs`, `.../events` and
 `POST /:id/stop`, none of which this endpoint can do yet, because those all need the Run

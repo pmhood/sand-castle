@@ -45,8 +45,12 @@ with a pushed branch and an issue comment:
 | Run completed | 4 | no — no run states exist to move through |
 | Job exits | 2 | yes |
 
-So a green run here is not §42 passing. It is §42's middle four rows, reached from an HTTP
-request instead of from `launch-run.sh`, which is exactly what §37 asks for and no more.
+So a green run here is not §42 passing. Six of those eleven rows are `yes`: the five contiguous
+ones in the middle — Job created, Claude starts, Repo cloned, File created, Commit created —
+and `Job exits` at the end, which a Job does whether or not anything downstream of it exists.
+Everything §42 puts on either side of that middle is a later phase. What Phase 3 adds is that
+the five are reached from an HTTP request instead of from `launch-run.sh`, which is exactly what
+§37 asks for and no more.
 
 ## Prerequisites
 
@@ -125,12 +129,26 @@ kubectl auth can-i create jobs --as=system:serviceaccount:sandcastle-agents:sand
 
 ```sh
 make -C apps/server start                 # builds, then runs dist/src/main.js on port 3000
-PORT=3100 make -C apps/server start       # any port, if 3000 is taken
+PORT=3100 make -C apps/server start       # the same, on another port if 3000 is taken
+```
+
+**That blocks.** `start` runs the server in the foreground and does not return until you stop it,
+so run one of those two lines and leave it running: **steps 3–5 happen in a second terminal.** To
+stay in one terminal instead, background it and keep its log somewhere you can read:
+
+```sh
+PORT=3100 make -C apps/server start >/tmp/sandcastle-server.log 2>&1 &
+```
+
+Either way, confirm it is up from the terminal steps 3–5 will use, before going on:
+
+```sh
 curl -s http://127.0.0.1:3100/health      # {"status":"ok"}
 ```
 
 It binds `0.0.0.0`. A port already in use is a clean failure, not a hang — the process logs
-`EADDRINUSE` and exits 1.
+`EADDRINUSE` and exits 1. Backgrounded, that line lands in the log file rather than in your
+terminal, so the `curl` above is what tells you: no answer means read the log.
 
 ### 3. Make the request
 
@@ -225,6 +243,13 @@ is the one #28 and #41 were filed about:
 
 The second matters more than it looks: the unexpected field is refused rather than silently
 stripped, and the rejection does not echo its name or its value back (§52, §57).
+
+**Run again on the corrected text.** The procedure above was followed once more, verbatim and in
+a single terminal via step 2's backgrounded form, after two errors were fixed in this document:
+`POST` at `20:30:29Z` → `201`, `sandcastle-run-20260918-203029-1092a7`, Pod on `red`, the CLI
+read the same issue and committed a `README.md`, exit 0, Job deleted at `20:30:50Z`. Step 2's
+claim that `make -C apps/server start` blocks was checked directly rather than assumed: run in
+the foreground on a free port it was still running 25 seconds later and never returned.
 
 **What was not observed, in this run.** No 502, 503 or 500 was induced here — those paths are
 covered by `apps/server/test/api/test-runs.test.ts` and by the live classification #53 recorded

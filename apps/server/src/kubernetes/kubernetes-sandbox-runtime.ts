@@ -38,6 +38,12 @@
 // call never reached the API server, so that is classified as the cluster being unreachable
 // rather than a rejection.
 //
+// Each of the four branches throws its own `Error` subclass (RbacDeniedError,
+// NamespaceMissingError, ApiRejectionError, ClusterUnreachableError, all defined just below).
+// #55's HTTP handler needs to map these to distinct status codes and cannot do that by matching
+// substrings of a message meant for a log -- that would silently break the moment this file's
+// wording changed. `instanceof` does not have that problem.
+//
 // One caveat worth recording rather than hiding: server-role.yaml scopes sandcastle-server's
 // Role to the sandcastle-agents namespace only. If that namespace itself were ever deleted, its
 // RoleBinding would go with it, and the *next* attempt to create a Job there would present as
@@ -98,6 +104,16 @@ function statusFields(body: unknown): { reason?: string; message?: string } {
     }
 }
 
+// One subclass per branch below, so #55's HTTP handler can tell the branches apart with
+// `instanceof` instead of pattern-matching the message text this file already composes for the
+// log. The message on each stays exactly what it was before these existed -- the assertions in
+// this file's own test match on `.message`, and #55's tests match on type -- so nothing here
+// changes what an operator sees, only what a caller can do with it programmatically.
+export class RbacDeniedError extends Error {}
+export class NamespaceMissingError extends Error {}
+export class ApiRejectionError extends Error {}
+export class ClusterUnreachableError extends Error {}
+
 /**
  * Turns whatever `createNamespacedJob` rejected with into an `Error` naming the layer that
  * broke, in the fail()-message style launch-run.sh uses for the same call made from bash.
@@ -108,7 +124,7 @@ function classifyFailure(error: unknown, jobName: string, namespace: string): Er
         const said = message ?? `HTTP ${String(error.code)}`
 
         if (reason === 'Forbidden') {
-            return new Error(
+            return new RbacDeniedError(
                 `RBAC denied creating Job '${jobName}' in namespace '${namespace}': the caller's ` +
                     `ServiceAccount has no Role granting 'create' on Jobs there -- see ` +
                     `deploy/kubernetes/server-role.yaml and server-rolebinding.yaml (docs/ARCHITECTURE.md ` +
@@ -117,20 +133,22 @@ function classifyFailure(error: unknown, jobName: string, namespace: string): Er
         }
 
         if (reason === 'NotFound') {
-            return new Error(
+            return new NamespaceMissingError(
                 `namespace '${namespace}' does not exist -- apply deploy/kubernetes/namespace.yaml. ` +
                     `Kubernetes said: ${said}`,
             )
         }
 
-        return new Error(
+        return new ApiRejectionError(
             `the Kubernetes API rejected Job '${jobName}' (HTTP ${String(error.code)}` +
                 `${reason !== undefined ? `, ${reason}` : ''}): ${said}`,
         )
     }
 
     const message = error instanceof Error ? error.message : String(error)
-    return new Error(`cannot reach the Kubernetes cluster to create Job '${jobName}': ${message}`)
+    return new ClusterUnreachableError(
+        `cannot reach the Kubernetes cluster to create Job '${jobName}': ${message}`,
+    )
 }
 
 /**

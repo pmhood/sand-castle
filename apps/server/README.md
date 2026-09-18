@@ -1,10 +1,9 @@
 # Sand Castle server
 
 The single deployable backend service (docs/ARCHITECTURE.md §5 — "avoid microservices"), built
-with Fastify on Node.js and TypeScript (§6). Right now it serves one route, `GET /health`, and
-holds two pieces of Phase 3 that nothing calls yet: the `SandboxRuntime` boundary (§18) and the
-agent Job builder (§20). The endpoint Phase 3 is actually about, `POST /api/test-runs` (§37),
-the runtime that submits the Job, and persistence are later issues in this phase.
+with Fastify on Node.js and TypeScript (§6). It serves `GET /health` and `POST /api/test-runs`
+(§37) — the endpoint Phase 3 is actually about: a request in, a Kubernetes Job out. Persistence,
+run state, logs and watchers are Phase 4 (§38) and are not here yet; this endpoint is stateless.
 
 ```text
 apps/server/
@@ -16,14 +15,20 @@ apps/server/
 ├── src/
 │   ├── app.ts          buildApp(): the Fastify instance and its routes
 │   ├── main.ts         the process entrypoint; the only thing that listens
+│   ├── api/
+│   │   └── test-runs.ts    POST /api/test-runs: validation, and the status-code mapping (§37)
 │   ├── sandbox/
 │   │   └── runtime.ts  the SandboxRuntime boundary (§18)
 │   └── kubernetes/
-│       └── job-builder.ts  buildAgentJob(): one run as a Kubernetes Job (§19, §20)
+│       ├── job-builder.ts             buildAgentJob(): one run as a Kubernetes Job (§19, §20)
+│       └── kubernetes-sandbox-runtime.ts  KubernetesSandboxRuntime: submits the Job (§18, §37)
 └── test/
     ├── health.test.ts  node:test suite, over a real socket
+    ├── api/
+    │   └── test-runs.test.ts  the endpoint, over a real socket, against a fake SandboxRuntime
     └── kubernetes/
-        └── job-builder.test.ts  the Job builder, against the bash renderer it must match
+        ├── job-builder.test.ts             the Job builder, against the bash renderer it must match
+        └── kubernetes-sandbox-runtime.test.ts  create(), against a fake Kubernetes client
 ```
 
 ## Running the checks
@@ -69,10 +74,73 @@ During development, Node runs the TypeScript sources directly — no build step:
 node --watch apps/server/src/main.ts
 ```
 
-## The agent Job builder, and the renderer that already existed
+## POST /api/test-runs
+
+```sh
+curl -i http://127.0.0.1:3000/api/test-runs \
+    -H 'content-type: application/json' \
+    -d '{"repository": "pmhood/level-zero", "issue": 142, "agent": "claude"}'
+```
+
+```text
+HTTP/1.1 201 Created
+content-type: application/json; charset=utf-8
+
+{"sandboxId":"sandcastle-run-20260101-120000-abc123"}
+```
+
+Creates a Kubernetes Job for the given run and returns its ID. Nothing about the run is
+persisted here — no database row, no way to look the run back up by this endpoint (that is Run
+persistence, §38, Phase 4). This is `select credential, inject credential, launch, observe` (§52)
+and nothing past it.
+
+**This route's name is temporary.** §37 names it `POST /api/test-runs`; §33's Initial API has no
+such route — it has `/api/runs` with `GET`, `GET /:id`, `.../logs`, `.../events` and
+`POST /:id/stop`, none of which this endpoint can do yet, because those all need the Run
+persistence §38 adds. `test-runs` says plainly that this is Phase 3 scaffolding rather than
+promising verbs that do not exist. The full reasoning, and who is expected to rename it, is in
+`src/api/test-runs.ts`'s file header — whichever issue implements §38 is the one that moves this
+to `/api/runs`.
+
+**Request body** — exactly these three fields, nothing else:
+
+| field        | type   | constraint                                                            |
+| ------------ | ------ | ---------------------------------------------------------------------- |
+| `repository` | string | `owner/repo`; letters, digits, `.`, `_`, `-` only (job-builder.ts's own pattern) |
+| `issue`      | number | a positive integer, no larger than 100,000,000                         |
+| `agent`      | string | `"claude"` only — `create-secrets.sh` provisions no Codex credential   |
+
+A body that is not an object, is missing a field, has the wrong type for one, fails one of the
+constraints above, or carries any field beyond these three is rejected with `400` before
+anything is rendered or reaches the cluster. An unexpected field is never echoed back — the
+handler builds the runtime input field by field, not by forwarding the parsed body.
+
+**Response status codes:**
+
+| status | meaning                                                                          |
+| ------ | --------------------------------------------------------------------------------- |
+| `201`  | the Job was created; the body carries its `sandboxId`                             |
+| `400`  | the request itself was malformed — see the table above                           |
+| `502`  | the request was well-formed but the Kubernetes API refused to create the Job (RBAC denial, missing namespace, or any other rejection) |
+| `503`  | the Kubernetes API could not be reached at all                                    |
+| `500`  | anything else — a bug, not a classified cluster response                          |
+
+A `502` or `503` body carries a fixed, generic message only. The namespace, the RBAC manifest to
+check, and the Kubernetes API's own reason and message go to the server's own log
+(`request.log.error`), not the HTTP response — that detail is for an operator, not a caller, and
+this is also where §52/§57's "no credential in a response, request log, or error" is enforced:
+nothing from the classified error is ever interpolated into what a client receives.
+
+`src/app.ts`'s `buildApp` takes the `SandboxRuntime` this route calls as a plain required
+argument — the test seam `SandboxRuntime` (§18) exists for. `src/main.ts` passes a real
+`KubernetesSandboxRuntime`; `test/api/test-runs.test.ts` passes a fake that never touches a
+cluster.
+
+## The agent Job builder, the runtime that submits it, and the renderer that already existed
 
 `src/kubernetes/job-builder.ts` turns a run — repository, issue, agent, run ID — into the
-Kubernetes Job of §20. Nothing submits it yet; that is #53, and the endpoint above it is #55.
+Kubernetes Job of §20. `src/kubernetes/kubernetes-sandbox-runtime.ts`'s `KubernetesSandboxRuntime`
+submits exactly what it rendered (#53), and the endpoint above submits a request into both (#55).
 
 `deploy/kubernetes/scripts/render-job.sh` renders the same manifest out of
 `deploy/kubernetes/job.yaml`, and stays. Phase 2 runs on it, an operator on a cluster with no

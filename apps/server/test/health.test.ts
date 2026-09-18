@@ -6,6 +6,16 @@ import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import type { FastifyInstance } from 'fastify'
 import { buildApp } from '../src/app.ts'
+import type { SandboxRuntime } from '../src/sandbox/runtime.ts'
+
+// /health has nothing to do with a sandbox; every method rejects with a distinguishable error,
+// so if a future change ever made the health route reach into SandboxRuntime, that would fail
+// loudly here rather than pass by coincidence.
+function runtimeThatMustNotBeCalled(): SandboxRuntime {
+    const fail = (method: string) => (): Promise<never> =>
+        Promise.reject(new Error(`FAKE MISUSE: GET /health must not call SandboxRuntime.${method}`))
+    return { create: fail('create'), get: fail('get'), stop: fail('stop'), logs: fail('logs'), cleanup: fail('cleanup') }
+}
 
 let app: FastifyInstance
 let origin: string
@@ -13,7 +23,7 @@ let origin: string
 before(async () => {
     // Loopback and port 0: the OS picks a free port, so the suite never collides with a server
     // the developer already has running and never listens on an address off the machine.
-    app = buildApp()
+    app = buildApp(runtimeThatMustNotBeCalled())
     origin = await app.listen({ host: '127.0.0.1', port: 0 })
 })
 

@@ -518,9 +518,9 @@ the token alone. (The value is not shown.)
 The same rule is applied to `GITHUB_TOKEN`, so the two stay consistent (#7 wants it inside the
 container as well).
 
-An exported value beats `images/.env.local`, which is where this script differs from `smoke.sh`
-deliberately: it writes to a cluster, and a stale line in the file silently overriding what you
-just exported would install yesterday's credential and say nothing about it.
+An exported value beats `images/.env.local`, matching `images/agent/scripts/smoke.sh`: a stale
+line in the file silently overriding what you just exported would install yesterday's
+credential and say nothing about it.
 
 ### Confirming them, without printing anything
 

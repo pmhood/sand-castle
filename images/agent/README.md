@@ -306,6 +306,10 @@ the network, the repository, or the CLI — not a failure in the bootstrap.
 
 Set one of the required credentials for your chosen agent. The harness reads from environment
 variables first; if they are not set, it looks for a git-ignored file at `images/.env.local`.
+**An already-exported, non-empty variable always wins over the file** -- if the same variable is
+both exported and present in `images/.env.local` with a different value, the exported one is
+used, and an exported-but-empty variable is treated as absent, so the file's value is used
+instead. This matches `deploy/kubernetes/scripts/create-secrets.sh`, which reads the same file.
 
 **Claude Code CLI (via `AGENT=claude`, the default):**
 
@@ -442,6 +446,9 @@ The `images/.env.local` file is git-ignored and never committed. You are respons
 - Removing it or rotating your credentials before sharing your machine
 - Being aware that `$HOME` is writable in the container, so a stale dotfile can interfere with
   the run (see [Security notes](#security-notes) for what protections the bootstrap has)
+- Knowing that an exported variable always beats a stale line left in this file (see
+  [Credentials](#credentials)), so a rotated credential you export takes effect even if the old
+  one is still sitting in `images/.env.local`
 
 ## Versions pinned in this image
 

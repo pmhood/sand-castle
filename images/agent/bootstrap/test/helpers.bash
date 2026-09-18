@@ -239,6 +239,17 @@ installFakeDocker() {
 #!/usr/bin/env bash
 # Fake docker: record the invocation and exit cleanly without running anything.
 printf '%s\n' "$@" >"$DOCKER_RECORD/docker.argv"
+# Also record the resolved value of each credential-shaped variable, one file per variable
+# under docker.env.*. `-e VAR` passes a value by name -- docker.argv never holds it, matching
+# the real docker run -- but a test still needs to see which of two candidate values (one
+# exported, one from images/.env.local) smoke.sh's precedence actually picked (#26). This file
+# is read only by the test suite, never by smoke.sh or by a real docker; it exists purely so
+# that assertion does not have to go through argv or a log line, which would violate the same
+# rule it is checking (§14).
+for var in GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN \
+           CODEX_API_KEY CODEX_ACCESS_TOKEN CLAUDE_CONFIG_DIR CODEX_HOME; do
+    printf '%s' "${!var-}" >"$DOCKER_RECORD/docker.env.$var"
+done
 # Simulate `docker image inspect` behavior for the "image already exists" path.
 if [[ "$1" == "image" && "$2" == "inspect" ]]; then
     exit 0

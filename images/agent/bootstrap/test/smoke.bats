@@ -17,6 +17,32 @@ setup() {
     :
 }
 
+# smoke.sh always reads images/.env.local at this fixed, absolute path -- it is not
+# configurable (#16 wants a seam for that; not implemented here). A test that writes to it
+# backs up anything already there and restores it in teardown, so a developer's real file, or
+# one another test left behind by mistake, is never destroyed.
+ENV_LOCAL_FILE="$(cd "$(dirname "$SMOKE_SCRIPT")/../.." && pwd)/.env.local"
+
+writeEnvLocalFile() {
+    if [ -f "$ENV_LOCAL_FILE" ]; then
+        ENV_LOCAL_BACKUP="$BATS_TEST_TMPDIR/env.local.backup"
+        mv "$ENV_LOCAL_FILE" "$ENV_LOCAL_BACKUP"
+    fi
+    ENV_LOCAL_WRITTEN=1
+    printf '%s' "$1" >"$ENV_LOCAL_FILE"
+}
+
+teardown() {
+    [ -n "${ENV_LOCAL_WRITTEN:-}" ] || return 0
+    if [ -n "${ENV_LOCAL_BACKUP:-}" ]; then
+        mv "$ENV_LOCAL_BACKUP" "$ENV_LOCAL_FILE"
+    else
+        rm -f "$ENV_LOCAL_FILE"
+    fi
+    ENV_LOCAL_WRITTEN=
+    ENV_LOCAL_BACKUP=
+}
+
 @test "smoke script requires GITHUB_REPOSITORY" {
     run bash -c "unset GITHUB_REPOSITORY GITHUB_ISSUE_NUMBER AGENT; '$SMOKE_SCRIPT'" 2>&1
     [ "$status" -ne 0 ]
@@ -234,6 +260,72 @@ AGENT_CREDENTIAL_VARS=(
     [ -f "$DOCKER_RECORD/docker.argv" ]
     run grep -Fxq SANDCASTLE_RUN_ID "$DOCKER_RECORD/docker.argv"
     [ "$status" -eq 0 ]
+}
+
+# The three precedence cases #26 asks for, all observed through the fake docker's per-variable
+# docker.env.* record (installFakeDocker in helpers.bash) rather than through $output or
+# docker.argv: the value itself must never reach either (§14), so the only way to say which
+# value won is to read it back from a file no credential-handling code in smoke.sh itself
+# writes.
+
+@test "smoke script prefers an exported credential over images/.env.local" {
+    writeEnvLocalFile "GITHUB_TOKEN='stale-file-github-a1b2c3'
+CLAUDE_CODE_OAUTH_TOKEN='stale-file-claude-d4e5f6'
+"
+    run bash -c "
+        export GITHUB_TOKEN='fresh-exported-github-1a2b3c'
+        export CLAUDE_CODE_OAUTH_TOKEN='fresh-exported-claude-4d5e6f'
+        '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1
+    "
+    [ "$status" -eq 0 ]
+
+    # Neither value reaches output, whichever won.
+    refuteContains "$output" 'stale-file-github-a1b2c3' 'stale-file-claude-d4e5f6' \
+        'fresh-exported-github-1a2b3c' 'fresh-exported-claude-4d5e6f'
+
+    run cat "$DOCKER_RECORD/docker.env.GITHUB_TOKEN"
+    assertContains "$output" 'fresh-exported-github-1a2b3c'
+    refuteContains "$output" 'stale-file-github-a1b2c3'
+
+    run cat "$DOCKER_RECORD/docker.env.CLAUDE_CODE_OAUTH_TOKEN"
+    assertContains "$output" 'fresh-exported-claude-4d5e6f'
+    refuteContains "$output" 'stale-file-claude-d4e5f6'
+}
+
+@test "smoke script uses images/.env.local's value when nothing is exported" {
+    writeEnvLocalFile "GITHUB_TOKEN='only-in-file-github-7g8h9i'
+CLAUDE_CODE_OAUTH_TOKEN='only-in-file-claude-0j1k2l'
+"
+    run bash -c "
+        unset GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+        '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1
+    "
+    [ "$status" -eq 0 ]
+    refuteContains "$output" 'only-in-file-github-7g8h9i' 'only-in-file-claude-0j1k2l'
+
+    run cat "$DOCKER_RECORD/docker.env.GITHUB_TOKEN"
+    assertContains "$output" 'only-in-file-github-7g8h9i'
+
+    run cat "$DOCKER_RECORD/docker.env.CLAUDE_CODE_OAUTH_TOKEN"
+    assertContains "$output" 'only-in-file-claude-0j1k2l'
+}
+
+# The case where "environment wins" and "empty is not a value" (§14, #14, validateCredentials)
+# could contradict each other: an exported-but-empty GITHUB_TOKEN must be treated as absent, so
+# the file's value is used rather than the empty string winning by virtue of being exported.
+@test "smoke script treats an exported empty credential as absent and falls back to the file" {
+    writeEnvLocalFile "GITHUB_TOKEN='fallback-file-github-3m4n5o'
+"
+    run bash -c "
+        export GITHUB_TOKEN=''
+        export CLAUDE_CODE_OAUTH_TOKEN='exported-claude-token'
+        '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1
+    "
+    [ "$status" -eq 0 ]
+    refuteContains "$output" 'fallback-file-github-3m4n5o'
+
+    run cat "$DOCKER_RECORD/docker.env.GITHUB_TOKEN"
+    assertContains "$output" 'fallback-file-github-3m4n5o'
 }
 
 @test "smoke script is valid bash syntax" {

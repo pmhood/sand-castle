@@ -83,16 +83,33 @@ locateCredentialFile() {
     fi
 }
 
-# Source a credential file if one exists. Do not export the variables; they will be passed
-# to the container through the environment, and the script never logs them (§14).
+# Source a credential file if one exists, without letting it override what the operator
+# already exported. An already-set, non-empty variable is left alone; the file only fills in
+# what is unset or empty (empty is not a value here, exactly as in validateCredentials). A
+# stale line in the file silently beating an exported value would install yesterday's
+# credential and say nothing about it -- the same reasoning create-secrets.sh's
+# sourceCredentialFile applies to the same file (#20, #26). Save what the environment has for
+# every variable this script reads, source, then put back what was saved.
 sourceCredentialFile() {
     [[ -z "${CREDENTIAL_FILE-}" ]] && return 0
     [[ -f "$CREDENTIAL_FILE" ]] || die "Credential file $CREDENTIAL_FILE not found"
+
+    local var saved
+    for var in GITHUB_TOKEN "${AGENT_CREDENTIAL_VARS[@]}"; do
+        printf -v "PRESET_$var" '%s' "${!var-}"
+    done
+
     # Use 'set -a' to export, then unset it so these variables don't leak to subshells.
     set -a
     # shellcheck source=/dev/null
     source "$CREDENTIAL_FILE"
     set +a
+
+    for var in GITHUB_TOKEN "${AGENT_CREDENTIAL_VARS[@]}"; do
+        saved="PRESET_$var"
+        [[ -z "${!saved}" ]] || printf -v "$var" '%s' "${!saved}"
+        unset "$saved"
+    done
 }
 
 # Validate that the required credentials are present for the selected agent and GitHub.

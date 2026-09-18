@@ -28,7 +28,9 @@ load helpers
 REPO_ROOT="$(cd "$(dirname "$BOOTSTRAP_DIR")/../.." && pwd)"
 LAUNCH_SCRIPT="$REPO_ROOT/deploy/kubernetes/scripts/launch-run.sh"
 SECRETS_SCRIPT="$REPO_ROOT/deploy/kubernetes/scripts/create-secrets.sh"
+PROBE_SCRIPT="$REPO_ROOT/deploy/kubernetes/scripts/probe-nodes.sh"
 JOB_MANIFEST="$REPO_ROOT/deploy/kubernetes/job.yaml"
+HELPERS="$BOOTSTRAP_DIR/test/helpers.bash"
 
 # Obviously-fake credentials, distinct per variable. They are seeded into the fake cluster the
 # way an operator seeds the real one, and then must appear nowhere the launcher goes.
@@ -203,6 +205,46 @@ appliedManifest() {
     # so, where a missing-file error inside a `run` would read as a script bug.
     [ -x "$LAUNCH_SCRIPT" ]
     [ -f "$JOB_MANIFEST" ]
+}
+
+# Every `-o jsonpath=...` a script asks for, one per line and exactly as it is written there.
+scriptQueries() {
+    grep -o "jsonpath='[^']*'" "$1" | sed "s/^jsonpath='//; s/'\$//"
+}
+
+# #28. The fake used to pick its canned answer from a *substring* of the jsonpath, so a mistyped
+# field path -- `state.terminated.exitCodeX` -- matched the same substring, got the same canned
+# answer, and left every test here passing. A real cluster answers a field that does not exist
+# with an empty string and exit 0, so the same typo live demotes the run to the generic "could
+# not classify" branch: a confidently useless message, arrived at silently, which is the failure
+# §36 exists to prevent. The fake now compares the whole query, and this says so in one line
+# rather than leaving it to whichever test happens to break first.
+#
+# Both scripts, because the fake is shared and a query it has not been taught is answered from
+# nothing whichever suite reaches it. Teaching it one is a line in helpers.bash.
+@test "every jsonpath the launcher and the probe ask for is one the fake kubectl recognises" {
+    local helpers script queries query
+    helpers=$(cat "$HELPERS")
+
+    for script in "$LAUNCH_SCRIPT" "$PROBE_SCRIPT"; do
+        queries=$(scriptQueries "$script")
+        # An extractor that finds nothing would pass this test without reading a single query,
+        # which is the shape of inert assertion #8 found 49 of.
+        [ -n "$queries" ] || {
+            printf 'no jsonpath found in %s, so this test checked nothing\n' "$script"
+            return 1
+        }
+        while IFS= read -r query; do
+            case $helpers in
+                *"$query"*) ;;
+                *)
+                    printf '%s asks for a jsonpath the fake kubectl does not know, so the fake\nwould answer it from nothing and no test would notice (#28):\n  %s\n' \
+                        "$script" "$query"
+                    return 1
+                    ;;
+            esac
+        done <<<"$queries"
+    done
 }
 
 # --- what reaches the cluster -------------------------------------------------------------

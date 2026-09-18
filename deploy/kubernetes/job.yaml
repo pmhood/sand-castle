@@ -56,6 +56,26 @@ spec:
       # already has a checkout in it, a directory the bootstrap expects to be empty.
       restartPolicy: Never
 
+      # The requirement this manifest used to have and not state (#30). The agent CLI is a Bun
+      # single-file executable whose modern x86-64 build needs AVX2, and `linux/amd64` -- the
+      # most an image manifest list can say -- is not granular enough to express that: this
+      # cluster's two amd64 nodes are not equivalent, and the one without AVX2 kills the binary
+      # with SIGILL (exit 132) after everything else in the run has already worked. Without this
+      # line, which of the two a run lands on is the scheduler's choice, so the same command
+      # succeeds or fails by coin flip.
+      #
+      # The label is not an operator's opinion about a node. scripts/probe-nodes.sh writes it,
+      # having run `claude --version` from this exact image digest on that node and read what
+      # happened: `true` means the binary ran there, `false` means it did not. A node nobody has
+      # probed carries no label and therefore takes no run -- exclusion is the safe direction,
+      # and README.md ("Which nodes can run the agent") says what that looks like when it is
+      # every node, because on a cluster nobody has probed *nothing* schedules.
+      #
+      # Quoted, like every other value in this file: a label selector value is a string, and a
+      # bare `true` is a YAML boolean the API server refuses outright.
+      nodeSelector:
+        sandcastle.dev/agent-capable: "true"
+
       # §50: a dedicated identity with no Kubernetes API access. Set here as well as on the
       # ServiceAccount because this is the field the kubelet actually consults -- an edit to
       # serviceaccount.yaml alone cannot quietly put a token back in the container.

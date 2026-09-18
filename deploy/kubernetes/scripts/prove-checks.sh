@@ -118,6 +118,25 @@ readonly MUTATIONS=(
     'nothing else is set in the Pod spec, including a way around the scheduler'
 
     job.yaml
+    'del(.spec.template.spec.nodeSelector)'
+    'a run only lands on a node measured to run the agent binary (#30)'
+
+    job.yaml
+    '.spec.template.spec.nodeSelector = {"kubernetes.io/os": "linux"}'
+    'the constraint is the capability one, not merely some constraint'
+
+    job.yaml
+    '.spec.template.spec.nodeSelector."sandcastle.dev/agent-capable" = "false"'
+    'the selector names the nodes that can run the agent, not the ones that cannot'
+
+    # `style=""` cannot express this one: yq re-quotes a string whose text would otherwise parse
+    # as a boolean, so the mutation has to write the boolean itself -- which is exactly what an
+    # unquoted `sandcastle.dev/agent-capable: true` in job.yaml is.
+    job.yaml
+    '.spec.template.spec.nodeSelector."sandcastle.dev/agent-capable" = true'
+    'the selector value is a label value and not a YAML boolean'
+
+    job.yaml
     '.spec.suspend = true'
     'nothing else is set in the Job spec'
 

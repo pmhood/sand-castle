@@ -312,6 +312,9 @@ while [ $# -gt 0 ]; do
         -o) outputFormat=$2; shift 2 ;;
         -o*) outputFormat=${1#-o}; shift ;;
         --dry-run=*) shift ;;
+        # Flags that carry no value and must not be read as a verb: --overwrite (label,
+        # annotate), --ignore-not-found and --wait (delete).
+        --overwrite | --ignore-not-found | --wait=*) shift ;;
         -l) shift 2 ;;
         --field-selector) shift 2 ;;
         --container) shift 2 ;;
@@ -368,6 +371,17 @@ case "${verb[*]-}" in
         # An applied Job is also what makes `get job <name>` start answering, so a launcher
         # that checked for a name collision *after* applying would see its own Job.
         case $manifest in
+            *"kind: Pod"*)
+                # deploy/kubernetes/scripts/probe-nodes.sh's probe Pod. Recorded by name as
+                # well as in the stream, so a test can assert one node's Pod was applied
+                # without reading the other's out of the same file -- and appended to the
+                # lifecycle log below, which is what makes "deleted after it was applied"
+                # answerable per Pod rather than per run.
+                printf '%s\n' "$name" >>"$state/applied-pods"
+                printf 'applied %s\n' "$name" >>"$state/pod-events"
+                printf 'pod/%s created\n' "$name"
+                exit 0
+                ;;
             *"kind: Job"*)
                 printf '%s\n' "$name" >"$state/applied-job"
                 # PSA admits the Job and refuses the Pod, so the refusal arrives as a warning
@@ -439,13 +453,77 @@ case "${verb[*]-}" in
         case $outputFormat in
             *metadata.name*) canned podName ;;
             *PodScheduled*) canned schedulingFacts ;;
-            *) canned podFacts ;;
+            # The probe asks about one named Pod per node and the launcher about the run's, so
+            # a per-name answer wins over the shared one where a test supplied it.
+            *)
+                if [ -n "${verb[2]-}" ] && [ -f "$state/podFacts.${verb[2]}" ]; then
+                    canned "podFacts.${verb[2]}"
+                else
+                    canned podFacts
+                fi
+                ;;
         esac
+        ;;
+
+    # Cluster-scoped reads and writes, which only probe-nodes.sh and the launcher's capability
+    # preflight make. Which answer a `get nodes` wants is again decided by the jsonpath: the
+    # name and the image together is the launcher asking which nodes it may schedule onto, the
+    # name alone is the probe asking what there is to probe, and the image alone is the probe
+    # counting what a run could reach.
+    "get nodes")
+        [ "${KUBECTL_FAKE_NODES_UNREADABLE:-no}" = no ] ||
+            fail 'Error from server (Forbidden): nodes is forbidden: User "fake" cannot list resource "nodes" at the cluster scope'
+        case $outputFormat in
+            *metadata.name*annotations*) canned capableNodes ;;
+            *metadata.name*) canned nodeNames ;;
+            *) canned capableImages ;;
+        esac
+        ;;
+
+    "get node "*) canned "nodeCapability.${verb[2]}" ;;
+
+    "label node "*)
+        printf '%s\n' "${verb[2]} ${verb[3]-}" >>"$state/labels"
+        printf 'node/%s labeled\n' "${verb[2]}"
+        ;;
+
+    "annotate node "*)
+        [ "${KUBECTL_FAKE_ANNOTATE_FAILS:-no}" = no ] ||
+            fail 'Error from server (Forbidden): nodes "'"${verb[2]}"'" is forbidden'
+        printf '%s\n' "${verb[2]} ${verb[3]-}" >>"$state/annotations"
+        printf 'node/%s annotated\n' "${verb[2]}"
+        ;;
+
+    "delete pod "*)
+        # Both records: the set of names, and the ordered lifecycle log. A probe deletes a Pod
+        # name before applying it as well as after, so only the order distinguishes the cleanup
+        # from the pre-apply sweep -- and only a *per-Pod* order distinguishes one node's
+        # cleanup from the next node's sweep.
+        printf '%s\n' "${verb[2]}" >>"$state/deleted-pods"
+        printf 'deleted %s\n' "${verb[2]}" >>"$state/pod-events"
+        printf 'pod "%s" deleted\n' "${verb[2]}"
         ;;
 
     "get events") canned jobCreateFailure ;;
 
-    logs*) canned logs ;;
+    logs*)
+        # The Pod name is still in "$@": the flag loop stops as soon as it knows the verb is
+        # `logs`, so that `-f` is not read as a file. It is the first argument that is not a
+        # flag, whether the caller wrote `logs <pod>` or `logs -f <pod> --container agent`.
+        pod=
+        for argument in "$@"; do
+            case $argument in
+                -*) continue ;;
+            esac
+            pod=$argument
+            break
+        done
+        if [ -n "$pod" ] && [ -f "$state/logs.$pod" ]; then
+            canned "logs.$pod"
+        else
+            canned logs
+        fi
+        ;;
 
     *) fail "unsupported invocation: ${verb[*]-}" ;;
 esac
@@ -456,6 +534,8 @@ EOF
     export KUBECTL_FAKE_NAMESPACE=sandcastle-agents
     export KUBECTL_FAKE_NAMESPACE_MISSING=no
     export KUBECTL_FAKE_SERVICEACCOUNT_MISSING=no
+    export KUBECTL_FAKE_NODES_UNREADABLE=no
+    export KUBECTL_FAKE_ANNOTATE_FAILS=no
     export PATH="$bin:$PATH"
 }
 

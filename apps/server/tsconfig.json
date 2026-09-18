@@ -1,0 +1,38 @@
+{
+  // One config for the whole package: `npm run build` emits from it, ESLint's type-aware rules
+  // read it, and it covers test/ as well as src/ so a type error in a test fails the build
+  // rather than waiting to surprise someone at run time. Emitting test/ too is the price, and
+  // is why the entrypoint is dist/src/main.js.
+  //
+  // `erasableSyntaxOnly` is the load-bearing one: Node runs the .ts sources directly by
+  // stripping types (that is how `npm test` needs no build step), and stripping cannot handle
+  // enums, namespaces or parameter properties. This option makes tsc reject them, so the
+  // sources tsc accepts are exactly the sources Node can run.
+  "compilerOptions": {
+    "target": "es2024",
+    "lib": ["es2024"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+
+    "rootDir": ".",
+    "outDir": "dist",
+    "sourceMap": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+
+    // Imports name the file that is really there ("./app.ts"), because that is what Node
+    // resolves when it runs the sources; tsc rewrites them to ".js" on the way into dist/.
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+
+    "skipLibCheck": true
+  },
+  "include": ["src", "test"]
+}

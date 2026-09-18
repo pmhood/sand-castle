@@ -569,6 +569,9 @@ Responsibilities:
 11. report completion
 ```
 
+Step 5 (Engram) and steps 10 and 11 (push, report) are not implemented yet: §41 covers step 5,
+and §29/§30 cover steps 10 and 11.
+
 Conceptual shell:
 
 ```text
@@ -583,6 +586,11 @@ sandcastle-run
     ├── persistArtifacts()
     └── reportResult()
 ```
+
+This conceptual shell is the entrypoint's intended shape, not sandcastle-run's current
+implementation: configureEngram() is §41 work; configureAgentAuth() names credential setup the
+caller performs, not this script (§15/§16); and runValidation() and persistArtifacts() are
+intended but not yet assigned a phase.
 
 Keep orchestration logic in this wrapper rather than embedding it into giant Kubernetes commands.
 

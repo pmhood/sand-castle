@@ -5,11 +5,18 @@ with no Sand Castle server involved. See §19 (Job, not Pod), §20 (the example 
 (namespace), §23 (resource limits), §24 (workspace), §47 (cleanup) and §50 (security
 boundaries).
 
+The server's own identity and RBAC (§22) live here too, ahead of the server itself: #54 built
+them so #53 has something to submit a Job as, independently of the server's own code. See "The
+server's identity" below.
+
 ```text
 deploy/kubernetes/
-├── namespace.yaml        the sandcastle-agents namespace every run lives in (§21)
-├── serviceaccount.yaml   the run's identity, with no Kubernetes API token (§50)
-├── job.yaml              one run, as a Job template with three placeholders (§19, §20)
+├── namespace.yaml               the sandcastle-agents namespace every run lives in (§21)
+├── serviceaccount.yaml          the run's identity, with no Kubernetes API token (§50)
+├── server-serviceaccount.yaml   the server's identity (§22, §50) -- see "The server's identity"
+├── server-role.yaml             what that identity may do, and no more (§22)
+├── server-rolebinding.yaml      what binds the two above together
+├── job.yaml                     one run, as a Job template with three placeholders (§19, §20)
 └── scripts/
     ├── create-secrets.sh the two credential Secrets the Job reads (§14, §15)
     ├── render-job.sh     substitutes the placeholders; the renderer on this side
@@ -54,6 +61,9 @@ Once, to set the cluster up:
 ```sh
 kubectl apply -f deploy/kubernetes/namespace.yaml
 kubectl apply -f deploy/kubernetes/serviceaccount.yaml
+kubectl apply -f deploy/kubernetes/server-serviceaccount.yaml
+kubectl apply -f deploy/kubernetes/server-role.yaml
+kubectl apply -f deploy/kubernetes/server-rolebinding.yaml
 ./deploy/kubernetes/scripts/create-secrets.sh                # see "Credentials" below
 ./deploy/kubernetes/scripts/probe-nodes.sh                   # see "Which nodes can run the agent"
 ```
@@ -122,6 +132,65 @@ The one thing the launcher checks that these commands do not is the **agent**: i
 `[agent]` as a third argument and compares it with what `job.yaml` sets, rather than
 substituting it. `AGENT` is deliberately not a placeholder (see "Running Codex instead of
 Claude"), so asking for an agent the manifest does not run is refused rather than half-done.
+
+## The server's identity
+
+`sandcastle-server` (§22, §50) -- not `sandcastle-agent`, which is a different identity for a
+different actor and must stay that way (see serviceaccount.yaml's own header). This is what #53
+will submit a Job as, once the server exists to do it; #54 built the identity and its
+permissions first and independently, so that work is not blocked on the server's own code.
+
+**What it is.** A ServiceAccount, a Role and a RoleBinding, all in `sandcastle-agents` (§21) --
+`server-serviceaccount.yaml`, `server-role.yaml` and `server-rolebinding.yaml`. Three files, not
+one: they are three distinct Kubernetes objects that only do anything bound together, but this
+directory's convention is one kind per file (`namespace.yaml`, `serviceaccount.yaml`,
+`job.yaml`), `validate.sh` asserts every manifest here holds exactly one document so a second
+object can never ride along inside a file unexamined, and the order they are applied in does not
+matter -- so there was nothing to gain by combining them and a property to lose. See
+`server-role.yaml`'s header for the fuller version of this reasoning.
+
+**What it may do.** Exactly §22's list, minus `pods/exec` (§22 defers that). `server-role.yaml`
+writes the granted verbs as two groups per resource, so the distinction below is visible in the
+manifest itself and not only here:
+
+| Verb | Resource | In use |
+| --- | --- | --- |
+| `create` | `jobs` | **yes** -- §37's `POST /api/test-runs` is the only thing that calls this Role today |
+| `get`, `list`, `watch`, `delete` | `jobs` | not yet -- granted ahead of use; §38 and §47 are what will call these |
+| `get`, `list`, `watch` | `pods` | not yet -- granted ahead of use, for the same reason |
+| `get` | `pods/log` | not yet -- granted ahead of use; this is the `pods/log` *subresource*, not a verb on `pods` |
+
+Granting the whole list now, rather than one verb per issue, is what §22 explicitly permits: one
+reviewed change instead of five. What it does not permit is hiding that only `create` is live,
+which is why the split above exists.
+
+**What it deliberately may not.** `pods/exec` (§22 defers it), anything cluster-scoped
+(`server-role.yaml` is a `Role` and `server-rolebinding.yaml` is a `RoleBinding`, never their
+`Cluster*` counterparts -- §22: "do not grant cluster-admin"), and anything outside
+`sandcastle-agents`: all three objects are namespaced to it, and a `Role`'s permissions cannot
+reach beyond the namespace it lives in regardless of what binds to it.
+
+**How an operator applies it.** The three `kubectl apply` lines in "Running one" above, in any
+order, once per cluster -- the same one-time step as the namespace and the agent's
+ServiceAccount, and for the same reason: nothing here changes per run.
+
+**Why this ServiceAccount lives in `sandcastle-agents`, not `sandcastle-system`.** §21 names
+`sandcastle-system` for the server's own workload, and that namespace does not exist in this
+repository yet -- "Why only one namespace" below is still accurate; it arrives with the
+Deployment it is meant to separate. A RoleBinding's subject can name a ServiceAccount in a
+different namespace from the one the binding grants in, so nothing here has to change when
+`sandcastle-system` and a Deployment for the server do arrive; only where the *Pod* that
+authenticates as `sandcastle-server` runs would be new, not this identity or what it may do.
+
+**Verifying it, with a cluster.** `kubectl auth can-i` answers exactly the acceptance criterion
+this issue was given -- "can create a Job in `sandcastle-agents` and cannot create one
+elsewhere":
+
+```sh
+kubectl auth can-i create jobs --as=system:serviceaccount:sandcastle-agents:sandcastle-server -n sandcastle-agents   # yes
+kubectl auth can-i create jobs --as=system:serviceaccount:sandcastle-agents:sandcastle-server -n default             # no
+kubectl auth can-i '*' '*' --as=system:serviceaccount:sandcastle-agents:sandcastle-server -A                        # no (no cluster-admin, anywhere)
+```
 
 ## Which nodes can run the agent
 
@@ -711,7 +780,8 @@ deliberately. A follow-up issue does it once a run has actually succeeded.
 **No RBAC for the agent.** The ServiceAccount has no Role and no RoleBinding, and the Pod
 mounts no token, so the agent cannot reach the Kubernetes API at all (§50). The permissions
 §22 describes belong to the Sand Castle server, which creates and watches these Jobs from
-outside the namespace; they arrive with the server in Phase 3.
+outside the namespace -- `server-serviceaccount.yaml`, `server-role.yaml` and
+`server-rolebinding.yaml` are that RBAC (#54); "The server's identity" above has the detail.
 
 ### Never an empty credential
 
@@ -753,6 +823,18 @@ both the Pod and the ServiceAccount, the resource limits are §23's, the writabl
 mounted and are `emptyDir`s, the `nodeSelector` is the capability one, and no `env:` entry
 carries a literal credential value.
 
+The server's RBAC gets its own set: `server-role.yaml` is a `Role` and `server-rolebinding.yaml`
+a `RoleBinding`, never their cluster-scoped counterparts; both live in `sandcastle-agents` and
+nowhere else; the binding's one subject is `sandcastle-server`, of kind `ServiceAccount`, in
+that same namespace; each of the Role's four rules grants exactly the API group, resource and
+verb set §22 and "The server's identity" above say it should, checked rule by rule rather than
+as a set so that `create` on `jobs` -- what Phase 3 actually calls -- is asserted separately from
+the rest; no rule grants a wildcard verb, resource or API group; and `pods/exec` is granted
+nowhere. `test("^\*$")` is the wildcard check's actual expression, not `. == "*"`: `yq` treats
+an unescaped `*` in `==` as a glob that matches every string, which would make that assertion
+pass by matching everything rather than by finding nothing -- the anchored regex is what asks
+whether an element is *literally* a single asterisk.
+
 The `nodeSelector` gets two assertions rather than one, and the second is about a *type*: the
 value must be the string `"true"`, because a label value is a string and an unquoted `true` is a
 YAML boolean the API server refuses. Its mutation has to write the boolean itself -- `yq`'s
@@ -766,8 +848,10 @@ container; and every one of them reads document 0 of its file, so a second docum
 behind the Job would be schema-checked and then never looked at again. `validate.sh` therefore
 pins the shape as well as the contents: exactly one container, no init or ephemeral containers,
 no `envFrom`, one document per manifest, one Pod per run (`parallelism`/`completions`), and a
-manifest set that is exactly the three files named above -- so a fourth manifest is a decision
-someone has to make here rather than a file nothing reads.
+manifest set that is exactly the six files named above -- so a seventh manifest is a decision
+someone has to make here rather than a file nothing reads. The server's Role gets the same
+treatment for its own rule count: exactly four, so a rule added without updating this README and
+the table in "The server's identity" fails until someone decides it belongs.
 
 A security context is also defined by what is *absent* from it, and an enumeration of dangerous
 fields is out of date the next time Kubernetes adds one. Three of them are asserted by name,
@@ -967,6 +1051,9 @@ because the API server resolves a namespaced object's namespace before admitting
 ```sh
 kubectl apply -f deploy/kubernetes/namespace.yaml
 kubectl apply --dry-run=server -f deploy/kubernetes/serviceaccount.yaml
+kubectl apply --dry-run=server -f deploy/kubernetes/server-serviceaccount.yaml
+kubectl apply --dry-run=server -f deploy/kubernetes/server-role.yaml
+kubectl apply --dry-run=server -f deploy/kubernetes/server-rolebinding.yaml
 ./deploy/kubernetes/scripts/render-job.sh dry-run-0001 octocat/Hello-World 1 |
   kubectl apply --dry-run=server -f -
 ```

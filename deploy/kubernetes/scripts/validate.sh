@@ -137,7 +137,8 @@ checkManifestSet() {
     done < <(manifestFiles)
 
     check "every manifest in this directory is one this script knows about" \
-        "job.yaml namespace.yaml serviceaccount.yaml" "${names# }"
+        "job.yaml namespace.yaml server-role.yaml server-rolebinding.yaml server-serviceaccount.yaml serviceaccount.yaml" \
+        "${names# }"
 }
 
 # Every property assertion reads document 0. A second document appended to a manifest would be
@@ -178,6 +179,102 @@ checkServiceAccount() {
         "sandcastle-agent" "$(read_ "$file" '.metadata.name')"
     check "the ServiceAccount mounts no Kubernetes API token (§50)" \
         "false" "$(read_ "$file" '.automountServiceAccountToken')"
+}
+
+# The server's identity (§22, §50). Distinct from checkServiceAccount above, which is the
+# agent's: two ServiceAccounts now live in this directory and must never be confused with each
+# other, so each gets its own function reading its own file.
+checkServerServiceAccount() {
+    local file="$MANIFEST_DIR/server-serviceaccount.yaml"
+
+    check "the server has its own ServiceAccount, distinct from the agent's (§50)" \
+        "sandcastle-server" "$(read_ "$file" '.metadata.name')"
+    check "the server ServiceAccount lives in sandcastle-agents (§21)" \
+        "sandcastle-agents" "$(read_ "$file" '.metadata.namespace')"
+}
+
+# §22's minimum, granted in sandcastle-agents and nowhere else. Each rule is checked by index
+# rather than by a set operation, because the file's four rules are written in a fixed order
+# specifically so a reader (and this script) can tell "in use today" from "granted ahead of
+# use" apart -- see server-role.yaml's header.
+checkServerRole() {
+    local file="$MANIFEST_DIR/server-role.yaml" rules=".rules"
+
+    check "server-role.yaml grants a Role, not a ClusterRole (§22)" \
+        "Role" "$(read_ "$file" '.kind')"
+    check "the server Role only grants within sandcastle-agents (§21, §22)" \
+        "sandcastle-agents" "$(read_ "$file" '.metadata.namespace')"
+
+    # Rule 0: the one verb Phase 3 (§37) actually calls today.
+    check "jobs:create is scoped to the batch API group" \
+        "batch" "$(read_ "$file" "${rules}[0].apiGroups | join(\",\")")"
+    check "jobs:create names exactly the jobs resource" \
+        "jobs" "$(read_ "$file" "${rules}[0].resources | join(\",\")")"
+    check "jobs:create grants exactly the create verb Phase 3 calls (§37), nothing wider" \
+        "create" "$(read_ "$file" "${rules}[0].verbs | join(\",\")")"
+
+    # Rule 1: the rest of §22's job verbs, granted ahead of use.
+    check "the remaining job verbs are scoped to the batch API group" \
+        "batch" "$(read_ "$file" "${rules}[1].apiGroups | join(\",\")")"
+    check "the remaining job verbs name exactly the jobs resource" \
+        "jobs" "$(read_ "$file" "${rules}[1].resources | join(\",\")")"
+    check "the remaining job verbs are exactly §22's get/list/watch/delete" \
+        "get,list,watch,delete" "$(read_ "$file" "${rules}[1].verbs | join(\",\")")"
+
+    # Rule 2: pods, ahead of use.
+    check "the pods rule is scoped to the core API group" \
+        "" "$(read_ "$file" "${rules}[2].apiGroups | join(\",\")")"
+    check "the pods rule names exactly the pods resource" \
+        "pods" "$(read_ "$file" "${rules}[2].resources | join(\",\")")"
+    check "the pods rule grants exactly §22's get/list/watch" \
+        "get,list,watch" "$(read_ "$file" "${rules}[2].verbs | join(\",\")")"
+
+    # Rule 3: pod logs are the pods/log subresource (§22), not a verb on pods.
+    check "pod logs are granted through the pods/log subresource, not a verb on pods" \
+        "pods/log" "$(read_ "$file" "${rules}[3].resources | join(\",\")")"
+    check "the pods/log rule is scoped to the core API group" \
+        "" "$(read_ "$file" "${rules}[3].apiGroups | join(\",\")")"
+    check "the pods/log rule grants exactly get" \
+        "get" "$(read_ "$file" "${rules}[3].verbs | join(\",\")")"
+
+    check "the Role grants no rule beyond these four (§22: minimum, no cluster-admin)" \
+        "4" "$(read_ "$file" "${rules} | length")"
+
+    # `select(. == "*")` is not a literal comparison in yq -- "*" is a glob there and matches
+    # every element, which would make this assertion pass by matching everything rather than by
+    # finding nothing. `test("^\*$")`, an anchored regex, is what actually asks "is this element
+    # literally a single asterisk".
+    check "no rule grants a wildcard verb" \
+        "0" "$(read_ "$file" "[${rules}[].verbs[] | select(test(\"^\\*\$\"))] | length")"
+    check "no rule grants a wildcard resource" \
+        "0" "$(read_ "$file" "[${rules}[].resources[] | select(test(\"^\\*\$\"))] | length")"
+    check "no rule grants a wildcard API group" \
+        "0" "$(read_ "$file" "[${rules}[].apiGroups[] | select(test(\"^\\*\$\"))] | length")"
+    check "pods/exec is not granted -- §22 defers it" \
+        "0" "$(read_ "$file" "[${rules}[].resources[] | select(. == \"pods/exec\")] | length")"
+}
+
+# The binding is what actually connects the identity to the permissions; a Role or a
+# ServiceAccount with no RoleBinding authorizes nobody.
+checkServerRoleBinding() {
+    local file="$MANIFEST_DIR/server-rolebinding.yaml"
+
+    check "server-rolebinding.yaml is a RoleBinding, not a ClusterRoleBinding (§22)" \
+        "RoleBinding" "$(read_ "$file" '.kind')"
+    check "the binding only exists in sandcastle-agents (§21, §22)" \
+        "sandcastle-agents" "$(read_ "$file" '.metadata.namespace')"
+    check "the binding points at a Role, not a ClusterRole (§22)" \
+        "Role" "$(read_ "$file" '.roleRef.kind')"
+    check "the binding points at the server Role" \
+        "sandcastle-server" "$(read_ "$file" '.roleRef.name')"
+    check "the binding has exactly one subject" \
+        "1" "$(read_ "$file" '.subjects | length')"
+    check "the subject is a ServiceAccount, not a User or Group" \
+        "ServiceAccount" "$(read_ "$file" '.subjects[0].kind')"
+    check "the subject is the server ServiceAccount, not the agent's" \
+        "sandcastle-server" "$(read_ "$file" '.subjects[0].name')"
+    check "the subject's namespace is sandcastle-agents, not left to default elsewhere" \
+        "sandcastle-agents" "$(read_ "$file" '.subjects[0].namespace')"
 }
 
 checkJobShape() {
@@ -524,6 +621,9 @@ main() {
 
     checkNamespace
     checkServiceAccount
+    checkServerServiceAccount
+    checkServerRole
+    checkServerRoleBinding
     checkJobShape "$job"
     checkPodShape "$job"
     checkJobLabels "$job"

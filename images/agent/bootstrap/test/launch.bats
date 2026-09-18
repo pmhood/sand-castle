@@ -212,13 +212,18 @@ scriptQueries() {
     grep -o "jsonpath='[^']*'" "$1" | sed "s/^jsonpath='//; s/'\$//"
 }
 
-# How many `-o jsonpath=` a script asks for, in any spelling. scriptQueries only recognises the
-# single-quoted one, so a query written another way -- double-quoted, unquoted, built from a
-# variable -- does not appear in scriptQueries' output and would otherwise vanish without a
-# trace (#41): five recognised queries plus one that is not still looks, to scriptQueries, like a
-# script that only ever had five. Comparing this count against scriptQueries' catches that.
+# How many `-o jsonpath=` a script asks for, in any spelling and counted per occurrence rather
+# than per line, so two on one line count as two. scriptQueries only recognises the single-
+# quoted one, so a query written another way -- double-quoted, unquoted, built from a variable
+# -- does not appear in scriptQueries' output and would otherwise vanish without a trace (#41):
+# five recognised queries plus one that is not still looks, to scriptQueries, like a script that
+# only ever had five. Comparing this count against scriptQueries' catches that.
+#
+# A comment line is excluded, the same as check-jsonpath.sh's awk excludes one: the two have to
+# agree on what counts as an invocation, or a comment that happens to mention the flag fails this
+# test for a reason that is not a query at all.
 scriptJsonpathInvocations() {
-    grep -o -- '-o jsonpath=' "$1" | wc -l | tr -d ' '
+    grep -v '^[[:space:]]*#' "$1" | { grep -o -- '-o jsonpath=' || true; } | wc -l | tr -d ' '
 }
 
 # #28. The fake used to pick its canned answer from a *substring* of the jsonpath, so a mistyped

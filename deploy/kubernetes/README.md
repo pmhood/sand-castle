@@ -921,13 +921,17 @@ at, so it says the queries fit *that* one and not that they fit the next version
 
 **Both extractors still only parse one spelling of `-o jsonpath=`.** They match literally
 rather than parse shell, deliberately, since these are two known files rather than arbitrary
-scripts (`check-jsonpath.sh:89-104`). A query written some other way -- double-quoted, unquoted,
+scripts (`check-jsonpath.sh:89-107`). A query written some other way -- double-quoted, unquoted,
 built from a variable -- is still not itself understood. What changed is that this no longer
 happens silently (#41): a script with five recognised queries and one that is not used to still
-look, and pass, like one with five. Both extractors now count every `-o jsonpath=` invocation a
-script makes and require that count to match how many they could actually parse, so a spelling
-neither understands fails loudly -- the bats suite or `check-jsonpath.sh`, naming the line -- at
-the point it is introduced, instead of being quietly left out of both.
+look, and pass, like one with five. Both extractors now count every occurrence of
+`-o jsonpath=` a script's non-comment lines carry -- not merely whether a line has one, so two
+on the same line cannot hide one behind the other -- and require that count to equal how many
+they could actually parse, so a spelling neither understands fails loudly -- the bats suite or
+`check-jsonpath.sh`, naming the line -- at the point it is introduced, instead of being quietly
+left out of both. A comment that happens to mention the flag does not count as an occurrence on
+either side, the same way `check-jsonpath.sh`'s own literal matching already skipped a comment
+line entirely, so a stray mention in prose cannot fail either check.
 
 ### Against the real cluster
 

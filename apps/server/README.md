@@ -1,9 +1,10 @@
 # Sand Castle server
 
 The single deployable backend service (docs/ARCHITECTURE.md §5 — "avoid microservices"), built
-with Fastify on Node.js and TypeScript (§6). Right now it serves one route, `GET /health`. The
-endpoint Phase 3 is actually about, `POST /api/test-runs` (§37), and everything behind it —
-the Kubernetes runtime, the Job builder, persistence — are later issues in this phase.
+with Fastify on Node.js and TypeScript (§6). Right now it serves one route, `GET /health`, and
+holds two pieces of Phase 3 that nothing calls yet: the `SandboxRuntime` boundary (§18) and the
+agent Job builder (§20). The endpoint Phase 3 is actually about, `POST /api/test-runs` (§37),
+the runtime that submits the Job, and persistence are later issues in this phase.
 
 ```text
 apps/server/
@@ -14,9 +15,15 @@ apps/server/
 ├── .nvmrc              the Node version CI and `nvm use` both read
 ├── src/
 │   ├── app.ts          buildApp(): the Fastify instance and its routes
-│   └── main.ts         the process entrypoint; the only thing that listens
+│   ├── main.ts         the process entrypoint; the only thing that listens
+│   ├── sandbox/
+│   │   └── runtime.ts  the SandboxRuntime boundary (§18)
+│   └── kubernetes/
+│       └── job-builder.ts  buildAgentJob(): one run as a Kubernetes Job (§19, §20)
 └── test/
-    └── health.test.ts  node:test suite, over a real socket
+    ├── health.test.ts  node:test suite, over a real socket
+    └── kubernetes/
+        └── job-builder.test.ts  the Job builder, against the bash renderer it must match
 ```
 
 ## Running the checks
@@ -62,6 +69,25 @@ During development, Node runs the TypeScript sources directly — no build step:
 node --watch apps/server/src/main.ts
 ```
 
+## The agent Job builder, and the renderer that already existed
+
+`src/kubernetes/job-builder.ts` turns a run — repository, issue, agent, run ID — into the
+Kubernetes Job of §20. Nothing submits it yet; that is #53, and the endpoint above it is #55.
+
+`deploy/kubernetes/scripts/render-job.sh` renders the same manifest out of
+`deploy/kubernetes/job.yaml`, and stays. Phase 2 runs on it, an operator on a cluster with no
+server needs it, and this server needs an object for the Kubernetes API rather than YAML. Two
+renderers of one manifest is what #26 was filed for, so they are pinned to each other instead of
+trusted: `test/kubernetes/job-builder.test.ts` executes `render-job.sh`, parses its output, and
+requires it to equal what the builder returns, field for field. Edit `job.yaml` without editing
+the builder and `server-test` goes red. The full decision, including when the two converge, is in
+the header of `src/kubernetes/job-builder.ts`; `deploy/kubernetes/README.md` says the same from
+the other side.
+
+No credential is involved on either side. Both produce `secretKeyRef` entries naming Secrets an
+operator created; no token value is read, rendered, logged or written into a fixture (§14, §52,
+§57).
+
 ## Why the toolchain looks like this
 
 Every piece here is a decision the rest of the project inherits, so each one is the smallest
@@ -79,6 +105,13 @@ thing that does the job rather than the most capable.
   already installed. `test/health.test.ts` binds a real socket on port 0 and makes a real
   `fetch`, rather than using Fastify's `inject` helper — with one route in the service, a test
   that never opens a port proves less than one that does.
+
+- **One devDependency that is not a tool: `yaml`.** `test/kubernetes/job-builder.test.ts` has to
+  read what `render-job.sh` actually printed, and that is YAML; Node has no parser for it and the
+  repository's other YAML reader, `yq`, is a binary the server's CI jobs do not install. Comparing
+  against a fixture written by hand instead would prove only that its author read the bash
+  consistently, which is the failure #28 documents. It is a test-only dependency with no
+  dependencies of its own, and it never ships in `dist/`.
 
 - **`tsc`, not a bundler.** The server runs from `node_modules` on a Node runtime; there is
   nothing to bundle. `npm run build` emits plain ESM into `dist/`.

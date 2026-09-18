@@ -12,7 +12,7 @@ deploy/kubernetes/
 ├── job.yaml              one run, as a Job template with three placeholders (§19, §20)
 └── scripts/
     ├── create-secrets.sh the two credential Secrets the Job reads (§14, §15)
-    ├── render-job.sh     substitutes the placeholders; the only renderer
+    ├── render-job.sh     substitutes the placeholders; the renderer on this side
     ├── launch-run.sh     runs one run and follows it; the Phase 2 command (§36)
     ├── probe-nodes.sh    measures which nodes can run the agent binary, and labels them (#30)
     ├── validate.sh       kubeconform + property assertions; what CI runs
@@ -23,8 +23,29 @@ deploy/kubernetes/
 No Helm chart, no Kustomize overlays, no templating engine. §36 is one Job run by hand and §54
 is explicit that the CRD is not to be built first; the same restraint applies to packaging.
 `launch-run.sh` is a shell script over `kubectl`, not the beginning of a controller: §37 is
-where a server first creates a Job, and it will render this same template from the same
-`render-job.sh`.
+where a server first creates a Job.
+
+## The other renderer
+
+The Phase 3 server builds this same Job itself, as a TypeScript object rather than as text:
+`apps/server/src/kubernetes/job-builder.ts` (#52). Two renderers of one manifest is the shape
+that produced #26, so this one is a deliberate, bounded exception rather than an oversight:
+
+- **Why both.** A server that submits a Job to the Kubernetes API has no use for rendered YAML,
+  and an operator on a cluster with no server running — which is every cluster until #53 lands —
+  has no use for a TypeScript build. `launch-run.sh`, `validate.sh` and `prove-checks.sh` all go
+  through `render-job.sh` today, and Phase 2 is the path that works.
+- **What stops them drifting.** `apps/server/test/kubernetes/job-builder.test.ts` runs
+  `render-job.sh` for real, parses what it printed, and requires it to equal what the builder
+  returns, field for field — including the pinned image digest. A change made to `job.yaml` and
+  not to the builder (or the reverse) turns the `server-test` check red. It is not a review
+  convention; it is a check.
+- **When they converge.** Once §37's `POST /api/test-runs` is how a run starts, the server is the
+  renderer every run goes through and these manifests become the manual fallback. That is the
+  point to decide whether `job.yaml` stays a template or becomes documentation — not before,
+  while deleting it would leave Phase 2 with no way to start a run at all.
+
+So: edit `job.yaml` and the builder together, and let the test tell you when you have not.
 
 ## Running one
 

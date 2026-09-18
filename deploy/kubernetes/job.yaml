@@ -6,9 +6,14 @@
 # This file is a template with three `${...}` placeholders -- RUN_ID, GITHUB_REPOSITORY and
 # GITHUB_ISSUE_NUMBER. Render it with `scripts/render-job.sh`, which validates each value and
 # refuses to substitute an empty one; applied unrendered it asks for a Job named
-# `sandcastle-${RUN_ID}`, which the API server rejects. Phase 3's launcher (#21) substitutes
-# the same three. Everything else is a deliberate constant, so a run differs from a run only in
-# which repository and issue it is pointed at.
+# `sandcastle-${RUN_ID}`, which the API server rejects. Everything else is a deliberate
+# constant, so a run differs from a run only in which repository and issue it is pointed at.
+#
+# This file is not the only copy of this manifest any more: the Phase 3 server builds the same
+# Job as a TypeScript object in apps/server/src/kubernetes/job-builder.ts (#52). Change a field
+# here and change it there too -- apps/server/test/kubernetes/job-builder.test.ts renders this
+# template and requires the two to match, so the server's test suite fails until you have.
+# README.md ("The other renderer") says why there are two and when there will be one.
 #
 # Every placeholder is quoted, without exception, because a substituted value is text and YAML
 # would otherwise read some of it as something else: run IDs like `123`, `0755` or `true` are

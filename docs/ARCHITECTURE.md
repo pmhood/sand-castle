@@ -524,6 +524,8 @@ Engram client/tools
 Sand Castle bootstrap script
 ```
 
+Engram client/tools is not in the image yet; §41 covers when it is added.
+
 Do not build one Kubernetes image per Run.
 
 The image should be immutable.

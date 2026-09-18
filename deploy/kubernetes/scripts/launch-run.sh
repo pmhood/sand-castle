@@ -90,8 +90,9 @@ Usage: $0 <owner/repo> <issue-number> [agent]
 
 Runs one agent run as a Kubernetes Job in the $NAMESPACE namespace and follows it.
 
-  GITHUB_REPOSITORY, GITHUB_ISSUE_NUMBER and AGENT are read from the environment if set,
-  and take precedence over the arguments. RUN_ID overrides the generated run ID.
+  GITHUB_REPOSITORY, GITHUB_ISSUE_NUMBER and AGENT may each be set by environment instead of
+  argument; a passed argument wins over an already-set environment variable of the same name.
+  RUN_ID overrides the generated run ID.
 
 This script takes no credential and accepts none: the run reads its credentials from the
 Secrets deploy/kubernetes/scripts/create-secrets.sh creates.
@@ -140,7 +141,13 @@ reportWhereTheRunIs() {
     log "    kubectl -n $NAMESPACE delete job $JOB_NAME"
 }
 
-# The environment takes precedence over the arguments, as in render-job.sh and smoke.sh.
+# An explicitly passed argument wins over an already-set environment variable of the same
+# name -- the argument is the more specific statement of intent (#64, applied here as #66).
+# This is *not* what images/agent/scripts/smoke.sh's own parseArgs does: there, an
+# already-exported environment variable wins over its arguments, deliberately left that way
+# because it is a different tool with a different entry contract (#66). `${1:-default}`, not
+# `${1-default}`, at every argument position: an empty value, argument or environment, is
+# treated the same as an unset one (#26).
 parseArgs() {
     local arg
 
@@ -156,9 +163,9 @@ parseArgs() {
         esac
     done
 
-    GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-${1-}}
-    GITHUB_ISSUE_NUMBER=${GITHUB_ISSUE_NUMBER:-${2-}}
-    AGENT=${AGENT:-${3-}}
+    GITHUB_REPOSITORY=${1:-${GITHUB_REPOSITORY:-}}
+    GITHUB_ISSUE_NUMBER=${2:-${GITHUB_ISSUE_NUMBER:-}}
+    AGENT=${3:-${AGENT:-}}
 
     [ $# -le 3 ] || dieUsage "too many arguments"
     [ -n "$GITHUB_REPOSITORY" ] || dieUsage "repository not set"

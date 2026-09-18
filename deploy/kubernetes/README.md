@@ -88,11 +88,14 @@ Then, per run:
 ```
 
 That renders `job.yaml` for a fresh run ID, applies it, follows the Pod's logs live, and exits
-with the run's result. It is the cluster counterpart of `images/agent/scripts/smoke.sh` and
-behaves like it: the environment beats the arguments (`GITHUB_REPOSITORY`,
-`GITHUB_ISSUE_NUMBER`, `AGENT`, and `RUN_ID` to override the generated run ID), validation
-happens before anything is applied, and **no credential is ever an argument**. It needs none of
-its own -- see "No credential passes through the launcher" below.
+with the run's result. It is the cluster counterpart of `images/agent/scripts/smoke.sh`, but
+does not share its precedence: an argument passed to `launch-run.sh` wins over an already-set
+environment variable of the same name (`GITHUB_REPOSITORY`, `GITHUB_ISSUE_NUMBER` or `AGENT`),
+matching `render-job.sh` (#64, #66) -- `smoke.sh` deliberately still prefers the environment,
+because it is a different tool with a different entry contract. `RUN_ID`, which has no argument
+of its own, still overrides the generated run ID. Validation happens before anything is
+applied, and **no credential is ever an argument**. It needs none of its own -- see "No
+credential passes through the launcher" below.
 
 Its exit status is the run's:
 
@@ -132,10 +135,10 @@ and refuses an empty value rather than rendering `sandcastle-` and a Job that co
 next one. `launch-run.sh` adds no validation of its own on top of it; it calls it and inherits
 its messages.
 
-Unlike `launch-run.sh` above, an argument passed to `render-job.sh` directly wins over an
+As with `launch-run.sh` above, an argument passed to `render-job.sh` directly wins over an
 already-set environment variable of the same name -- the argument is the more specific
 statement of intent, and an environment variable that is set but empty counts as not set at
-all (#64).
+all (#64, #66).
 
 The one thing the launcher checks that these commands do not is the **agent**: it takes
 `[agent]` as a third argument and compares it with what `job.yaml` sets, rather than

@@ -338,6 +338,80 @@ scriptJsonpathInvocations() {
     assertContains "$output" "$RUN_ID" 'ghcr.io/pmhood/sandcastle-agent@sha256:'
 }
 
+# --- argument precedence (#66) --------------------------------------------------------------
+#
+# GITHUB_REPOSITORY, GITHUB_ISSUE_NUMBER and AGENT may each arrive by argument or by an
+# already-set environment variable of the same name, and launch-run.sh's own parseArgs had the
+# identical bug #64 fixed in render-job.sh: the environment won, silently, over what an operator
+# typed. Fixed the same way, an explicit argument now wins. Distinct canaries per variable, so a
+# failure says which one lost -- the same shape as validate.sh's checkArgumentPrecedence, which
+# proves this for render-job.sh. parseArgs is shell logic prove-checks.sh's yq mutations cannot
+# reach (#67), so this bats suite is where the property is proved for this script instead.
+
+readonly PRECEDENCE_ENV_REPOSITORY='env-canary/repo'
+readonly PRECEDENCE_ARG_REPOSITORY='arg-canary/repo'
+readonly PRECEDENCE_ENV_ISSUE_NUMBER='4444'
+readonly PRECEDENCE_ARG_ISSUE_NUMBER='9999'
+# Deliberately not job.yaml's AGENT ("claude"): if the environment won this instead of the
+# argument, requireAgentMatchesManifest would refuse the run, so success is itself part of what
+# the first test below proves.
+readonly PRECEDENCE_ENV_AGENT='env-canary-agent'
+
+@test "an explicit repository, issue number and agent argument beat already-exported environment variables" {
+    givenPod "$FACTS_SUCCEEDED"
+    export GITHUB_REPOSITORY=$PRECEDENCE_ENV_REPOSITORY
+    export GITHUB_ISSUE_NUMBER=$PRECEDENCE_ENV_ISSUE_NUMBER
+    export AGENT=$PRECEDENCE_ENV_AGENT
+    runLaunch "$PRECEDENCE_ARG_REPOSITORY" "$PRECEDENCE_ARG_ISSUE_NUMBER" claude
+    [ "$status" -eq 0 ]
+
+    run appliedManifest
+    assertContains "$output" "value: \"$PRECEDENCE_ARG_REPOSITORY\"" "value: \"$PRECEDENCE_ARG_ISSUE_NUMBER\""
+    refuteContains "$output" "$PRECEDENCE_ENV_REPOSITORY" "$PRECEDENCE_ENV_ISSUE_NUMBER" "$PRECEDENCE_ENV_AGENT"
+}
+
+@test "GITHUB_REPOSITORY, GITHUB_ISSUE_NUMBER and AGENT are still read from the environment with no argument" {
+    givenPod "$FACTS_SUCCEEDED"
+    export GITHUB_REPOSITORY=$PRECEDENCE_ENV_REPOSITORY
+    export GITHUB_ISSUE_NUMBER=$PRECEDENCE_ENV_ISSUE_NUMBER
+    export AGENT=claude
+    runLaunch
+    [ "$status" -eq 0 ]
+
+    run appliedManifest
+    assertContains "$output" "value: \"$PRECEDENCE_ENV_REPOSITORY\"" "value: \"$PRECEDENCE_ENV_ISSUE_NUMBER\""
+}
+
+@test "the repository, issue number and agent arguments still work with nothing exported" {
+    givenPod "$FACTS_SUCCEEDED"
+    runLaunch "$PRECEDENCE_ARG_REPOSITORY" "$PRECEDENCE_ARG_ISSUE_NUMBER" claude
+    [ "$status" -eq 0 ]
+
+    run appliedManifest
+    assertContains "$output" "value: \"$PRECEDENCE_ARG_REPOSITORY\"" "value: \"$PRECEDENCE_ARG_ISSUE_NUMBER\""
+}
+
+@test "an exported-but-empty GITHUB_REPOSITORY is treated as absent, not as a value" {
+    export GITHUB_REPOSITORY=''
+    export GITHUB_ISSUE_NUMBER=7
+    runLaunch
+    [ "$status" -eq 64 ]
+    assertContains "$output" 'repository not set'
+    [ ! -f "$KUBECTL_RECORD/argv" ]
+}
+
+# The `:-` at the argument position, not `-`: an explicitly empty argument must fall through to
+# the environment rather than winning as an empty value (#64's reasoning, applied here).
+@test "an explicitly empty repository argument falls back to an exported GITHUB_REPOSITORY" {
+    givenPod "$FACTS_SUCCEEDED"
+    export GITHUB_REPOSITORY=$PRECEDENCE_ENV_REPOSITORY
+    runLaunch '' "$PRECEDENCE_ARG_ISSUE_NUMBER"
+    [ "$status" -eq 0 ]
+
+    run appliedManifest
+    assertContains "$output" "value: \"$PRECEDENCE_ENV_REPOSITORY\""
+}
+
 # --- failing before anything is applied ----------------------------------------------------
 
 @test "a missing Secret stops the run before a Job is applied, and names the credential layer" {

@@ -73,6 +73,25 @@ EOF
     refuteToken
 }
 
+# #7: a token holding a `"` and a newline closes the quoted `header = "..."` directive in
+# fetchIssueContext's curl --config and starts a new one. `output = <path>` is a real curl
+# config directive that redirects the response body to an attacker-chosen file; a trailing `#`
+# comments out the stray closing quote the printf format appends. Against the code before this
+# fix, this exact token makes curl silently divert the fetched issue body to $pwned -- and the
+# run still reports success, since jq raises nothing over the now-empty response it captured
+# instead. The file's absence is the property that matters; the run is also refused outright,
+# which is the cheaper way to detect that in a test.
+@test "a token that closes the curl-config quote cannot make curl write a file" {
+    local pwned="$BATS_TEST_TMPDIR/pwned"
+    GITHUB_TOKEN='legit"
+output = '"$pwned"'
+#' runBootstrap
+    [ ! -e "$pwned" ]
+    [ "$status" -eq 1 ]
+    assertContains "$output" "GITHUB_TOKEN must contain only"
+    refuteContains "$output" 'output =' "$pwned"
+}
+
 @test "the token is not embedded in the remote url or written into the checkout" {
     runBootstrap
     [ "$status" -eq 0 ]

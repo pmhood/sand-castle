@@ -95,22 +95,51 @@ parseArgs() {
 #
 # The resource is passed on as the script wrote it, `node` or `nodes`; `kubectl explain` takes
 # either, and rewriting it here would be this script guessing at plurals for no gain.
+#
+# Literal matching only understands one spelling: `-o jsonpath='...'`. A query written another
+# way -- double-quoted, unquoted, built from a variable -- does not match and used to be dropped
+# without a trace (#41): five recognised queries and one that was not still looked like five
+# queries, found and checked. So every occurrence of `-o jsonpath=` on a line is counted, in
+# whatever spelling, against every occurrence this loop actually extracts -- both by `gsub`/loop
+# over matches, not by whether the line has one at all, because a line asking for it twice is
+# two invocations and counting presence let the second one be dropped while the totals still
+# agreed. The two counts have to come out equal; a query this script cannot read now fails
+# loudly here instead of silently never being checked at all.
 queriesIn() {
-    awk '
+    awk -v file="$1" '
         { buffer = buffer $0 }
         /\\$/ { sub(/\\$/, " ", buffer); next }
         {
             line = buffer
             buffer = ""
             if (line ~ /^[[:space:]]*#/) next
-            if (!match(line, /get [a-z]+/)) next
-            resource = substr(line, RSTART + 4, RLENGTH - 4)
-            start = index(line, "-o jsonpath=\047")
-            if (start == 0) next
-            query = substr(line, start + 13)
-            stop = index(query, "\047")
-            if (stop == 0) next
-            print resource "\t" substr(query, 1, stop - 1)
+
+            tmp = line
+            n = gsub(/-o jsonpath=/, "&", tmp)
+            if (n == 0) next
+            invocations += n
+            before = extracted
+
+            if (match(line, /get [a-z]+/)) {
+                resource = substr(line, RSTART + 4, RLENGTH - 4)
+                rest = line
+                while ((start = index(rest, "-o jsonpath=\047")) > 0) {
+                    query = substr(rest, start + 13)
+                    stop = index(query, "\047")
+                    if (stop == 0) break
+                    extracted++
+                    print resource "\t" substr(query, 1, stop - 1)
+                    rest = substr(query, stop + 1)
+                }
+            }
+
+            if (extracted - before != n && bad == "") bad = line
+        }
+        END {
+            if (invocations != extracted) {
+                printf "[JSONPATH] ERROR: %s: -o jsonpath= appears %d time(s) but only %d parsed as the single-quoted form this script understands (check-jsonpath.sh:89-107); first unrecognised:\n[JSONPATH] ERROR:   %s\n", file, invocations, extracted + 0, bad > "/dev/stderr"
+                exit 1
+            }
         }
     ' "$1"
 }
@@ -191,16 +220,19 @@ emitPath() {
 
 # Every field path both scripts ask for, as `resource.path`, once each.
 allFieldPaths() {
-    local source resource query path found=0
+    local source resource query path found=0 queries
 
     for source in "${SOURCES[@]}"; do
         [ -f "$source" ] || die "$source is not there"
+        # queriesIn already reported the specific line above; this just stops the run.
+        queries=$(queriesIn "$source") || exit 1
         while IFS=$'\t' read -r resource query; do
+            [ -n "$resource" ] || continue
             found=$((found + 1))
             while IFS= read -r path; do
                 printf '%s.%s\n' "$resource" "$path"
             done < <(fieldPaths "$query")
-        done < <(queriesIn "$source")
+        done <<<"$queries"
     done
 
     # An extractor that reads nothing reports a clean run, which is the shape of check #8 found

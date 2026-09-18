@@ -212,6 +212,20 @@ scriptQueries() {
     grep -o "jsonpath='[^']*'" "$1" | sed "s/^jsonpath='//; s/'\$//"
 }
 
+# How many `-o jsonpath=` a script asks for, in any spelling and counted per occurrence rather
+# than per line, so two on one line count as two. scriptQueries only recognises the single-
+# quoted one, so a query written another way -- double-quoted, unquoted, built from a variable
+# -- does not appear in scriptQueries' output and would otherwise vanish without a trace (#41):
+# five recognised queries plus one that is not still looks, to scriptQueries, like a script that
+# only ever had five. Comparing this count against scriptQueries' catches that.
+#
+# A comment line is excluded, the same as check-jsonpath.sh's awk excludes one: the two have to
+# agree on what counts as an invocation, or a comment that happens to mention the flag fails this
+# test for a reason that is not a query at all.
+scriptJsonpathInvocations() {
+    grep -v '^[[:space:]]*#' "$1" | { grep -o -- '-o jsonpath=' || true; } | wc -l | tr -d ' '
+}
+
 # #28. The fake used to pick its canned answer from a *substring* of the jsonpath, so a mistyped
 # field path -- `state.terminated.exitCodeX` -- matched the same substring, got the same canned
 # answer, and left every test here passing. A real cluster answers a field that does not exist
@@ -223,7 +237,7 @@ scriptQueries() {
 # Both scripts, because the fake is shared and a query it has not been taught is answered from
 # nothing whichever suite reaches it. Teaching it one is a line in helpers.bash.
 @test "every jsonpath the launcher and the probe ask for is one the fake kubectl recognises" {
-    local helpers script queries query
+    local helpers script queries query invocations extracted
     helpers=$(cat "$HELPERS")
 
     for script in "$LAUNCH_SCRIPT" "$PROBE_SCRIPT"; do
@@ -234,6 +248,19 @@ scriptQueries() {
             printf 'no jsonpath found in %s, so this test checked nothing\n' "$script"
             return 1
         }
+
+        # #41. An extractor that finds *some* queries but not all of them passes the check above
+        # just as easily: a script with five single-quoted queries and one written another way
+        # still yields a non-empty list. A count that has to match, not just be non-empty, is
+        # what notices the one that got away.
+        invocations=$(scriptJsonpathInvocations "$script")
+        extracted=$(wc -l <<<"$queries" | tr -d ' ')
+        [ "$invocations" -eq "$extracted" ] || {
+            printf '%s asks for -o jsonpath= %d time(s) but only %d are written the single-\nquoted way this suite recognises, so the rest are never checked against the fake kubectl\nat all (#41)\n' \
+                "$script" "$invocations" "$extracted"
+            return 1
+        }
+
         while IFS= read -r query; do
             case $helpers in
                 *"$query"*) ;;

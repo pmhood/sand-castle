@@ -184,7 +184,10 @@ digest into the value would put the digest in `job.yaml` twice and turn a stale 
 
 `launch-run.sh` compares the two **before it applies anything**, and **refuses** the run if any
 node it could be scheduled onto was measured against a different image -- or carries the label
-with no recorded image at all, which is what a hand-applied one looks like.
+with no recorded image at all, which is what a hand-applied one looks like. Those are two
+different mistakes and get two different messages, because the operator will find two different
+things when they go and look: an annotation naming an older digest, or no annotation whatsoever.
+The fix is the same command either way.
 
 A refusal rather than a warning, and the asymmetry is the argument. A stale label costs an
 intermittent SIGILL that presents as an agent bug; re-probing costs one command and about a
@@ -308,6 +311,7 @@ launcher matches are what Kubernetes actually said rather than what it seemed li
 | `cluster` | the ServiceAccount is missing | `kubectl get serviceaccount` before applying | `kubectl apply -f serviceaccount.yaml` |
 | `capability` | no node is labelled able to run the agent binary | `kubectl get nodes -l sandcastle.dev/agent-capable=true` before applying | `probe-nodes.sh` |
 | `capability` | a candidate node was measured against another image | the same nodes' `sandcastle.dev/agent-capable-image` vs `job.yaml`'s digest | `probe-nodes.sh` again; `--show` says which image each carries |
+| `capability` | a candidate node carries the label with no image recorded at all -- a hand-applied one | the same annotation, absent | `probe-nodes.sh`, to measure what the label claims |
 | `cluster` | the run ID is already a Job | `kubectl get job` before applying | pick another `RUN_ID`, or delete that Job |
 | `credentials` | a Secret is missing, misnamed, or holds the wrong key | `create-secrets.sh --verify`, before applying | `create-secrets.sh` |
 | `cluster` | the API server refused the Job | non-zero `kubectl apply` | `validate.sh`, then fix `job.yaml` |

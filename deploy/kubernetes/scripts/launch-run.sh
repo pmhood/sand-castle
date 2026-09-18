@@ -233,7 +233,7 @@ capableNodes() {
 # is cluster-scoped, and launch-run.sh otherwise needs nothing outside its namespace. Absence of
 # evidence leaves the scheduler to enforce the selector and reportScheduling to explain it.
 requireNodesVerifiedForThisImage() {
-    local image output node nodeImage capable=0 stale=''
+    local image output node nodeImage capable=0 stale='' unrecorded=''
 
     image=$(manifestImage)
     if ! output=$(capableNodes); then
@@ -242,20 +242,34 @@ requireNodesVerifiedForThisImage() {
         return 0
     fi
 
+    # Two ways to be wrong, kept apart because they are different mistakes and an operator will
+    # find a different thing when they look. A node measured against another image was probed,
+    # once, for something else; a node with no image recorded at all was never probed by this
+    # script, because the probe always records one -- so that is a label somebody applied by
+    # hand, which is the claim #30 replaced with a measurement.
+    #
+    # Names only, on one line: which image each carries is what `--show` is for, and a message
+    # that has to wrap to be read is a message that does not get read.
     while IFS=$FIELD_SEPARATOR read -r node nodeImage; do
         [ -n "$node" ] || continue
         capable=$((capable + 1))
         [ "$nodeImage" != "$image" ] || continue
-        # Names only, on one line: which image each of them carries is what `--show` is for, and
-        # a message that has to wrap to be read is a message that does not get read.
-        stale="$stale $node"
+        if [ -z "$nodeImage" ]; then
+            unrecorded="$unrecorded $node"
+        else
+            stale="$stale $node"
+        fi
     done <<<"$output"
 
-    # No `detail` on either: `fail` labels that "Kubernetes said", and what follows here is this
-    # script's own reading of the cluster rather than anything Kubernetes was asked to judge.
+    # No `detail` on any of them: `fail` labels that "Kubernetes said", and what follows here is
+    # this script's own reading of the cluster rather than anything Kubernetes was asked to judge.
     [ "$capable" -gt 0 ] ||
         fail capability "no node carries $CAPABILITY_LABEL=true, and job.yaml schedules a run onto nothing else" \
             "$PROBE_SCRIPT runs \`$AGENT --version\` on each node and labels what actually happened"
+
+    [ -z "$unrecorded" ] ||
+        fail capability "$CAPABILITY_LABEL carries no recorded image on:$unrecorded, so nothing measured it (the probe always writes $CAPABILITY_IMAGE_ANNOTATION beside the label; a label without one was applied by hand)" \
+            "$PROBE_SCRIPT measures those nodes by running \`$AGENT --version\` on them"
 
     [ -z "$stale" ] ||
         fail capability "$CAPABILITY_LABEL is a claim about another image on:$stale (their $CAPABILITY_IMAGE_ANNOTATION is not the digest job.yaml pins)" \

@@ -374,8 +374,11 @@ case "${verb[*]-}" in
             *"kind: Pod"*)
                 # deploy/kubernetes/scripts/probe-nodes.sh's probe Pod. Recorded by name as
                 # well as in the stream, so a test can assert one node's Pod was applied
-                # without reading the other's out of the same file.
+                # without reading the other's out of the same file -- and appended to the
+                # lifecycle log below, which is what makes "deleted after it was applied"
+                # answerable per Pod rather than per run.
                 printf '%s\n' "$name" >>"$state/applied-pods"
+                printf 'applied %s\n' "$name" >>"$state/pod-events"
                 printf 'pod/%s created\n' "$name"
                 exit 0
                 ;;
@@ -492,7 +495,12 @@ case "${verb[*]-}" in
         ;;
 
     "delete pod "*)
+        # Both records: the set of names, and the ordered lifecycle log. A probe deletes a Pod
+        # name before applying it as well as after, so only the order distinguishes the cleanup
+        # from the pre-apply sweep -- and only a *per-Pod* order distinguishes one node's
+        # cleanup from the next node's sweep.
         printf '%s\n' "${verb[2]}" >>"$state/deleted-pods"
+        printf 'deleted %s\n' "${verb[2]}" >>"$state/pod-events"
         printf 'pod "%s" deleted\n' "${verb[2]}"
         ;;
 

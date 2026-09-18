@@ -11,6 +11,13 @@
 # this probe against `red` (Core i7-6700, AVX2) and `nova` (Core 2 Duo P8800, no AVX2) and
 # reading back what Kubernetes reported. helpers.bash binds the recording `kubectl` at load
 # time, so nothing here reaches a cluster.
+#
+# One convention, learned twice here at the cost of an assertion that could not fail: a fragment
+# passed to assertContains/assertLineContains is a *substring* test, so every fragment carries
+# enough punctuation to exclude the messages it would otherwise also match. A node is `red:` and
+# not `red`, because `red` matches the word "measured"; a verdict is `: CAPABLE` and not
+# `CAPABLE`, because `CAPABLE` matches "NOT CAPABLE"; a label is `true --` and not `true`,
+# because `true` matches the line reporting a label measured against another image.
 
 bats_require_minimum_version 1.5.0
 
@@ -73,20 +80,34 @@ appliedManifest() {
 
 # That a Pod was deleted at all proves nothing: probe-nodes.sh also deletes the Pod *before*
 # applying it, because one left by an interrupted probe would otherwise be read as this run's
-# result. Asserting only that a delete happened passes with the cleanup removed entirely -- #8's
-# lesson in miniature -- so this walks the ordered record of what kubectl was asked to do and
-# requires a delete after the apply.
+# result. So this requires a delete that came after *that Pod's own* apply.
+#
+# "After an apply" is not enough either, and the difference is the whole reason this comment is
+# long. An earlier version of this helper kept one `applied` flag for the run: it flipped on the
+# first apply of any Pod, so once `nova` had been applied, `red`'s *pre-apply* sweep satisfied
+# `red`'s assertion -- and removing the cleanup for `red` alone left this file entirely green
+# with a Pod leaked on the node. The flag has to be per-Pod, which is what the fake's `pod-events`
+# log makes possible: one ordered line per applied or deleted Pod, by name.
+#
+# The lesson is not that the first version was careless. It is that whether an assertion can fail
+# depends on the state of everything around it, and the only way to know is to break the
+# behaviour and watch it fail -- for each case, not for the first one.
 assertDeletedAfterApply() {
-    local pod=$1 line applied=no
+    local pod=$1 line applied=no events="$KUBECTL_RECORD/state/pod-events"
+
+    [ -f "$events" ] || {
+        printf 'no Pod was ever applied or deleted, so %s cannot have been cleaned up\n' "$pod"
+        return 1
+    }
     while IFS= read -r line; do
         case $line in
-            apply*) applied=yes ;;
-            *"delete pod $pod"*)
+            "applied $pod") applied=yes ;;
+            "deleted $pod")
                 [ "$applied" = no ] || return 0
                 ;;
         esac
-    done <"$KUBECTL_RECORD/commands"
-    printf 'no delete of %s after its apply, in:\n%s\n' "$pod" "$(cat "$KUBECTL_RECORD/commands")"
+    done <"$events"
+    printf 'no delete of %s after its own apply, in:\n%s\n' "$pod" "$(cat "$events")"
     return 1
 }
 
@@ -102,7 +123,7 @@ assertDeletedAfterApply() {
 
     run "$PROBE_SCRIPT" red
     [ "$status" -eq 0 ]
-    assertLineContains "$output" 'red:' 'CAPABLE' "$VERSION_LINE"
+    assertLineContains "$output" 'red:' ': CAPABLE' "$VERSION_LINE"
 
     run recorded labels
     assertContains "$output" "red $CAPABILITY_LABEL=true"
@@ -243,8 +264,8 @@ assertDeletedAfterApply() {
 
     run "$PROBE_SCRIPT" --show
     [ "$status" -eq 0 ]
-    assertLineContains "$output" 'red:' 'true' "job.yaml's image"
-    assertLineContains "$output" 'nova:' 'false' 'died here'
+    assertLineContains "$output" 'red:' 'true --' "job.yaml's image"
+    assertLineContains "$output" 'nova:' 'false --' 'died here'
 
     [ ! -f "$STATE/labels" ]
     [ ! -f "$STATE/annotations" ]

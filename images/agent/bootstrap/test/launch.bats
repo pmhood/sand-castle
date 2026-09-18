@@ -289,20 +289,28 @@ appliedManifest() {
 
     runLaunch octo/demo 7
     [ "$status" -eq 69 ]
-    assertLineContains "$output" 'FAILED at the capability layer' ': red'
+    assertLineContains "$output" 'FAILED at the capability layer' ': red' 'claim about another image'
     assertContains "$output" 'sandcastle.dev/agent-capable-image' 'probe-nodes.sh'
+    # Both capability messages name the annotation, so naming it proves nothing on its own; this
+    # is the message for a node that was measured, once, for something else.
+    refuteContains "$output" 'no recorded image'
     [ ! -f "$STATE/applied-job" ]
 }
 
 # A label with nothing recorded beside it is what a hand-applied one looks like -- an operator's
 # claim that no probe stands behind, which is the thing #30 rejected in favour of a measurement.
-# It is refused for the same reason a stale one is: nobody knows what it is about.
-@test "a capability label with no recorded image is refused like a stale one" {
+# It is refused like a stale one, and says so in its own words: the fix is the same, but what the
+# operator will find when they look is not.
+@test "a capability label with no recorded image is named as never measured, not as stale" {
     state capableNodes 'red|'
 
     runLaunch octo/demo 7
     [ "$status" -eq 69 ]
-    assertLineContains "$output" 'FAILED at the capability layer' ': red'
+    assertLineContains "$output" 'FAILED at the capability layer' ': red' 'no recorded image'
+    assertContains "$output" 'applied by hand'
+    # The stale message describes a different situation and would send the operator looking for
+    # an annotation that is not there.
+    refuteContains "$output" 'is a claim about another image'
     [ ! -f "$STATE/applied-job" ]
 }
 
@@ -315,7 +323,9 @@ nova|ghcr.io/pmhood/sandcastle-agent@sha256:000000000000000000000000000000000000
 
     runLaunch octo/demo 7
     [ "$status" -eq 69 ]
-    assertLineContains "$output" 'FAILED at the capability layer' ': nova'
+    assertLineContains "$output" 'FAILED at the capability layer' ': nova' 'claim about another image'
+    # The current node is not named as a problem, and is not what the message is about.
+    refuteContains "$output" ': red'
     [ ! -f "$STATE/applied-job" ]
 }
 

@@ -311,6 +311,15 @@ both exported and present in `images/.env.local` with a different value, the exp
 used, and an exported-but-empty variable is treated as absent, so the file's value is used
 instead. This matches `deploy/kubernetes/scripts/create-secrets.sh`, which reads the same file.
 
+`SANDCASTLE_ENV_FILE` overrides the file the harness reads, for an operator who keeps more than
+one credential set (a second GitHub token for a different org, say). It is the same variable
+`create-secrets.sh` already reads to find this file; set it and both scripts point at your
+chosen file instead of `images/.env.local`:
+
+```sh
+SANDCASTLE_ENV_FILE=~/.sandcastle/other-project.env make -C images/agent smoke
+```
+
 **Claude Code CLI (via `AGENT=claude`, the default):**
 
 Set one of:

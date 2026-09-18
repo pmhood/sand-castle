@@ -14,33 +14,45 @@ setup() {
     # The smoke script needs docker and a working repository to test against. For now, we
     # test the credential validation logic without actually building/running the image.
     # That is covered by the manual run documented in README.md.
-    :
+    #
+    # The operator's real images/.env.local must never be reachable from an ordinary test: it
+    # may hold real credentials, and a test that read them would hand them to the recording
+    # docker and write them into a temporary file (#16, §14). SANDCASTLE_ENV_FILE is the seam
+    # smoke.sh reads that path through -- the same one
+    # deploy/kubernetes/scripts/create-secrets.sh already reads this exact file through
+    # (secrets.bats, launch.bats) -- pointed at a path that does not exist unless a test writes
+    # it, so credential-file tests never touch the real one.
+    export SANDCASTLE_ENV_FILE="$BATS_TEST_TMPDIR/env.local"
 }
 
-# smoke.sh always reads images/.env.local at this fixed, absolute path -- it is not
-# configurable (#16 wants a seam for that; not implemented here). A test that writes to it
-# backs up anything already there and restores it in teardown, so a developer's real file, or
-# one another test left behind by mistake, is never destroyed.
-ENV_LOCAL_FILE="$(cd "$(dirname "$SMOKE_SCRIPT")/../.." && pwd)/.env.local"
-
 writeEnvLocalFile() {
-    if [ -f "$ENV_LOCAL_FILE" ]; then
-        ENV_LOCAL_BACKUP="$BATS_TEST_TMPDIR/env.local.backup"
-        mv "$ENV_LOCAL_FILE" "$ENV_LOCAL_BACKUP"
+    printf '%s' "$1" >"$SANDCASTLE_ENV_FILE"
+}
+
+# The real, fixed path smoke.sh falls back to when SANDCASTLE_ENV_FILE is not set -- used only
+# by the canary test below, which must write there deliberately to prove the seam keeps it out
+# of reach. Anything already there is a developer's real file (or one a prior run left behind by
+# mistake) and must never be destroyed, so this backs it up and restores it in teardown.
+REAL_ENV_LOCAL_FILE="$(cd "$(dirname "$SMOKE_SCRIPT")/../.." && pwd)/.env.local"
+
+writeRealEnvLocalFile() {
+    if [ -f "$REAL_ENV_LOCAL_FILE" ]; then
+        REAL_ENV_LOCAL_BACKUP="$BATS_TEST_TMPDIR/real-env.local.backup"
+        mv "$REAL_ENV_LOCAL_FILE" "$REAL_ENV_LOCAL_BACKUP"
     fi
-    ENV_LOCAL_WRITTEN=1
-    printf '%s' "$1" >"$ENV_LOCAL_FILE"
+    REAL_ENV_LOCAL_WRITTEN=1
+    printf '%s' "$1" >"$REAL_ENV_LOCAL_FILE"
 }
 
 teardown() {
-    [ -n "${ENV_LOCAL_WRITTEN:-}" ] || return 0
-    if [ -n "${ENV_LOCAL_BACKUP:-}" ]; then
-        mv "$ENV_LOCAL_BACKUP" "$ENV_LOCAL_FILE"
+    [ -n "${REAL_ENV_LOCAL_WRITTEN:-}" ] || return 0
+    if [ -n "${REAL_ENV_LOCAL_BACKUP:-}" ]; then
+        mv "$REAL_ENV_LOCAL_BACKUP" "$REAL_ENV_LOCAL_FILE"
     else
-        rm -f "$ENV_LOCAL_FILE"
+        rm -f "$REAL_ENV_LOCAL_FILE"
     fi
-    ENV_LOCAL_WRITTEN=
-    ENV_LOCAL_BACKUP=
+    REAL_ENV_LOCAL_WRITTEN=
+    REAL_ENV_LOCAL_BACKUP=
 }
 
 @test "smoke script requires GITHUB_REPOSITORY" {
@@ -326,6 +338,42 @@ CLAUDE_CODE_OAUTH_TOKEN='only-in-file-claude-0j1k2l'
 
     run cat "$DOCKER_RECORD/docker.env.GITHUB_TOKEN"
     assertContains "$output" 'fallback-file-github-3m4n5o'
+}
+
+# #16: an operator's real images/.env.local -- exactly what README.md recommends keeping for
+# repeat smoke runs -- must never be reachable from this suite. Before SANDCASTLE_ENV_FILE
+# existed, every test without a writeEnvLocalFile call still had smoke.sh source whatever real
+# file happened to be sitting there, handing its credentials to the recording docker and
+# writing them into a file under BATS_TEST_TMPDIR. setup() now points smoke.sh elsewhere for
+# every test in this file; this test proves that seam actually holds, by planting a real file
+# with canary credentials at the true default path and confirming none of them turn up
+# anywhere.
+@test "smoke script never reads the operator's real images/.env.local" {
+    writeRealEnvLocalFile "GITHUB_TOKEN='canary-real-github-9k2m4p'
+CLAUDE_CODE_OAUTH_TOKEN='canary-real-claude-7h3n1q'
+"
+    run bash -c "
+        unset GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+        export HOME=\$(mktemp -d)
+        '$SMOKE_SCRIPT' owner/repo 123 claude 2>&1
+    "
+
+    # Behaves exactly like "smoke script requires agent credentials (claude) and never invokes
+    # docker without them" above, which plants no real file at all: validation fails on the
+    # same missing-credential message, before docker is ever touched. That is the run behaving
+    # identically whether or not a populated real file exists on disk.
+    [ "$status" -ne 0 ]
+    assertContains "$output" 'GITHUB_TOKEN' 'CLAUDE_CODE_OAUTH_TOKEN'
+    [ ! -f "$DOCKER_RECORD/docker.argv" ]
+
+    refuteContains "$output" 'canary-real-github-9k2m4p' 'canary-real-claude-7h3n1q'
+
+    # Nor did it reach any file this suite creates: the stand-in docker's per-variable record,
+    # the fake agent CLIs' record, or anything else under this test's own tmpdir. The real file
+    # itself lives outside BATS_TEST_TMPDIR, so this only catches a copy that should not exist.
+    run grep -rF 'canary-real' "$BATS_TEST_TMPDIR"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
 }
 
 @test "smoke script is valid bash syntax" {

@@ -16,7 +16,8 @@ deploy/kubernetes/
     ├── launch-run.sh     runs one run and follows it; the Phase 2 command (§36)
     ├── probe-nodes.sh    measures which nodes can run the agent binary, and labels them (#30)
     ├── validate.sh       kubeconform + property assertions; what CI runs
-    └── prove-checks.sh   breaks each property and requires validate.sh to notice
+    ├── prove-checks.sh   breaks each property and requires validate.sh to notice
+    └── check-jsonpath.sh checks every jsonpath field path against the cluster's schema (#28)
 ```
 
 No Helm chart, no Kustomize overlays, no templating engine. §36 is one Job run by hand and §54
@@ -806,7 +807,7 @@ was induced there with fake values and the resulting Pod status, Job condition o
 copied into the test as a fixture. So the taxonomy is checked against what Kubernetes says
 rather than against what the launcher's author assumed it says, and the fake stays a stand-in
 for `kubectl` rather than a second implementation of the launcher -- it decides which canned
-answer a query wants from the shape of the jsonpath, and knows nothing about failure modes.
+answer a query wants from the jsonpath, and knows nothing about failure modes.
 
 Every assertion there was proven to bite the way `prove-checks.sh` proves these: one behaviour
 was broken at a time -- each branch of the image-pull classifier, the `CreateContainerConfigError`
@@ -835,6 +836,88 @@ existing file, and a whole new manifest appearing in the directory.
 
 Adding an assertion means adding its mutation. An assertion with no mutation behind it is a
 line nobody has checked, which is the state #8 found 49 of.
+
+### Checking the jsonpath queries
+
+The launcher decides which layer broke by asking the cluster for twenty-one field paths, in six
+`kubectl -o jsonpath` queries, and matching on what comes back. **A field path that is not there
+is answered with an empty string and exit 0.** No error, no warning, nothing in a log: the
+launcher reads the empty answer as a Pod that reported nothing and falls through to the generic
+"could not classify" branch, which is the exact failure §36 exists to prevent, arrived at
+confidently. `probe-nodes.sh` reads the cluster the same way, in four more queries.
+
+That used to be invisible in both directions. The bats suite's fake `kubectl` picked its canned
+answer from a *substring* of the query, so mutating `state.waiting.reason` to `reasonX` and
+`terminated.exitCode` to `exitCodeX` left the whole suite green under both shells while the same
+two typos live would have demoted every image-pull and every agent failure to one shrug (#28).
+Two checks now stand behind the queries, and they are not the same check:
+
+```sh
+make -C images/agent test                            # offline, in CI: the fake refuses a query it was never taught
+./deploy/kubernetes/scripts/check-jsonpath.sh        # needs a cluster: every field path against its schema
+./deploy/kubernetes/scripts/check-jsonpath.sh --list # what the second one would check, without a cluster
+```
+
+**The offline half** is `helpers.bash`: the fake holds every query the two scripts make, written
+out whole, and matches on the whole query. A mistyped field path is then a query the fake does
+not recognise, which it refuses instead of answering. `launch.bats` extracts every
+`-o jsonpath=` from `launch-run.sh` and `probe-nodes.sh` and requires each to appear there
+verbatim, so the failure is one named line -- *"asks for a jsonpath the fake kubectl does not
+know"* -- rather than an unrelated test failing three steps later for no stated reason. That
+also makes adding a query loud: a new one fails the suite until the fake is taught it, which is
+one line.
+
+**What the offline half cannot do is notice that Kubernetes changed.** The fake agrees with the
+queries because the same hand wrote both; all it can prove is that nobody has since changed one
+of them. So `check-jsonpath.sh` asks something that is not us. It pulls every jsonpath out of
+the two scripts, reduces each to the field paths it names -- dropping the subscripts, the
+literal separators, the `items` of a list, and the key half of an annotation lookup -- and runs
+`kubectl explain` on each against the live schema. A field a Kubernetes upgrade renamed or
+removed fails there and nowhere else. It needs a cluster, so it is not a CI check and is not
+required to be one: run it after upgrading the cluster, and when a query changes. `--list` needs
+no cluster and prints the twenty-three field paths it would check, which is also the quickest
+way to see that a query says what its author meant.
+
+Both were proven by breaking what they guard, the way `prove-checks.sh` proves `validate.sh`.
+`state.terminated.exitCode` in `launch-run.sh` was mutated to `exitCodeX`: on `main` that left
+all 46 of `launch.bats`'s tests passing, and with the strict fake it fails 28 of 47, the first
+of them naming the query. Against the k3s cluster, that typo and a second one inside a filter
+(`conditions[?(@.typeX=="PodScheduled")]`) were both reported by `check-jsonpath.sh`:
+
+```text
+[JSONPATH] NOT IN THE SCHEMA: pod.status.conditions.typeX
+[JSONPATH] NOT IN THE SCHEMA: pod.status.containerStatuses.state.terminated.exitCodeX
+[JSONPATH] 2 of 25 field paths are not in this cluster's schema
+```
+
+Reverting both made the suite and the schema check clean again. Adding a query was proven the
+same way: a `{.status.hostIP}` the fake had never been taught failed the suite on that one test,
+by name, and was removed.
+
+### What these checks do not cover
+
+**Message drift, deliberately.** Every branch of the launcher's classifier matches *prose*: the
+kubelet's reasons (`ErrImagePull`, `CreateContainerConfigError`) and containerd's sentences
+(`no match for platform`, `failed to authorize`). No schema describes either, so
+`check-jsonpath.sh` cannot see them and neither can the fake. A Kubernetes or containerd upgrade
+that rewords one demotes that run to the catch-all underneath it -- or, if a *reason* changed,
+past the classifier entirely and into the start timeout.
+
+This is an accepted risk rather than an oversight, and it is written here so the two are
+distinguishable. Catching a rewording needs a contract test that induces each failure on a live
+cluster -- an unpullable digest, an arm64-only image, a misspelled Secret key, a 1000-CPU
+request, a one-second deadline, one per branch -- which is what #21 did once, by hand, and
+keeping it as a standing check means a cluster, a maintained set of deliberate breakages, and
+somebody to read the result. What it buys is a more specific `Fix:` line: the layer is still
+named in most cases, and what Kubernetes said is quoted verbatim underneath it either way. That
+trade is not worth making today. It changes if the taxonomy ever grows a branch whose
+misclassification would send an operator somewhere actively wrong, rather than somewhere vague.
+
+Two smaller gaps, for the same reason: neither check knows whether a field the schema *has* holds
+what the launcher assumes it holds -- `state.terminated.signal` exists on every cluster and
+containerd fills in none of it, which is why the launcher reads the exit code as well and says
+which reading it used -- and `check-jsonpath.sh` validates against whichever cluster you point it
+at, so it says the queries fit *that* one and not that they fit the next version of it.
 
 ### Against the real cluster
 

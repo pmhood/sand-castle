@@ -466,6 +466,16 @@ waitForPod() {
 
 # Every way a container can fail to start, told apart by what the kubelet reports. Induced on a
 # real cluster, one at a time; the substrings below are what it actually said.
+#
+# What they are is prose. The reasons are the kubelet's constants and the messages are
+# containerd's sentences, no schema describes either, and an upgrade that rewords one demotes
+# that run to the catch-all below it -- or, if a reason changed, past this function altogether
+# and into the start timeout. That is a known gap, and it is accepted rather than closed: only a
+# contract test that induced each of these on a live cluster would notice a rewording, and
+# keeping one costs more than a less specific `Fix:` line is worth. The field paths the queries
+# above ask for are the half a schema *can* describe, and scripts/check-jsonpath.sh checks them;
+# deploy/kubernetes/README.md, "What these checks do not cover", is where both are written down
+# so that this being a decision, rather than an oversight, survives the next reader (#28).
 classifyWaiting() {
     local reason=$1 message=$2
 

@@ -267,8 +267,14 @@ EOF
 # deploy/kubernetes/scripts/launch-run.sh asks it about Jobs, Pods, events and logs as well, and
 # those answers are not invented here: a test writes them into $KUBECTL_RECORD/state, and what
 # launch.bats writes there is output recorded from a real k3s cluster, one failure mode at a
-# time. The fake decides *which* answer a query wants from the shape of the jsonpath, so it
-# stays a stand-in for kubectl rather than a second implementation of the launcher.
+# time. The fake decides *which* answer a query wants from the jsonpath, so it stays a stand-in
+# for kubectl rather than a second implementation of the launcher.
+#
+# From the *whole* jsonpath, and not a fragment of it (#28). It used to match a substring, which
+# meant a mistyped field path -- `terminated.exitCodeX` -- still matched and was still handed the
+# canned answer, while a real cluster answers a field that does not exist with an empty string
+# and exit 0. Every query the launcher and the probe make is therefore written out verbatim
+# below, and anything else is refused rather than guessed at.
 installFakeKubectl() {
     local root bin
     root=${BATS_TEST_TMPDIR:-${BATS_FILE_TMPDIR-}}
@@ -293,6 +299,33 @@ printf '%s\n' "$*" >>"$record/commands"
 # Whatever the test put there, or nothing at all, which is what an absent field looks like.
 canned() {
     cat "$state/$1" 2>/dev/null || true
+}
+
+# Every jsonpath the two scripts ask for, copied verbatim from them (#28). They are named rather
+# than written into the `case` patterns below because each has to be compared whole, and the one
+# the launcher reads a Pod's status with is four hundred characters long. launch.bats holds the
+# check that keeps these and the scripts identical.
+readonly QUERY_POD_NAME='{.items[*].metadata.name}'
+readonly QUERY_POD_FACTS='{.status.phase}{"|"}{.status.reason}{"|"}{.status.containerStatuses[*].state.waiting.reason}{"|"}{.status.containerStatuses[*].state.running.startedAt}{"|"}{.status.containerStatuses[*].state.terminated.reason}{"|"}{.status.containerStatuses[*].state.terminated.exitCode}{"|"}{.status.containerStatuses[*].state.terminated.signal}{"|"}{.spec.nodeName}{"|"}{.status.containerStatuses[*].state.waiting.message}{.status.containerStatuses[*].state.terminated.message}{.status.message}'
+readonly QUERY_PROBE_POD_FACTS='{.status.phase}{"|"}{.status.containerStatuses[*].state.waiting.reason}{"|"}{.status.containerStatuses[*].state.terminated.exitCode}{"|"}{.status.containerStatuses[*].state.waiting.message}'
+readonly QUERY_SCHEDULING_FACTS='{.status.conditions[?(@.type=="PodScheduled")].reason}{"|"}{.status.conditions[?(@.type=="PodScheduled")].message}'
+readonly QUERY_JOB_CONDITIONS='{range .status.conditions[*]}{.type} {.reason} {.message}{"\n"}{end}'
+readonly QUERY_JOB_CREATE_FAILURE='{.items[-1:].message}'
+readonly QUERY_CAPABLE_NODES='{range .items[*]}{.metadata.name}{"|"}{.metadata.annotations.sandcastle\.dev/agent-capable-image}{"\n"}{end}'
+readonly QUERY_NODE_NAMES='{range .items[*]}{.metadata.name}{"\n"}{end}'
+readonly QUERY_CAPABLE_IMAGES='{range .items[*]}{.metadata.annotations.sandcastle\.dev/agent-capable-image}{"\n"}{end}'
+readonly QUERY_NODE_CAPABILITY='{.metadata.labels.sandcastle\.dev/agent-capable}{"|"}{.metadata.annotations.sandcastle\.dev/agent-capable-image}'
+
+# A jsonpath none of the above is. Either a field path was mistyped -- which a real cluster
+# answers with an empty string and exit 0, so the caller classifies the run off nothing at all
+# and no test notices (#28) -- or the query is new and nobody taught this fake what it asks for.
+# Both are refusals, and the query is named so that the second is a one-line fix.
+#
+# Refusing is not where the *message* comes from: every caller reads kubectl's stderr into
+# /dev/null, so what a test would see is the launcher failing its way to something generic.
+# launch.bats says which query it is, before any of this runs.
+failUnknownQuery() {
+    fail "jsonpath no script here asks for, so it is mistyped or untaught (#28): $1"
 }
 
 # The flags the scripts pass, pulled out wherever they sit, so the fake does not depend on
@@ -330,6 +363,13 @@ fail() {
     printf 'fake kubectl: %s\n' "$*" >&2
     exit 1
 }
+
+# The query on its own, for the branches below to compare whole. Empty when the caller asked for
+# some other output format -- `-o yaml`, a go-template -- or for none.
+jsonpath=
+case $outputFormat in
+    jsonpath=*) jsonpath=${outputFormat#jsonpath=} ;;
+esac
 
 case "${verb[*]-}" in
     "get namespace $KUBECTL_FAKE_NAMESPACE")
@@ -437,50 +477,59 @@ case "${verb[*]-}" in
     "get job "*)
         # Two questions wear the same verb: "does this Job already exist" (the launcher's
         # collision check, before anything is applied) and "how did it end" (its conditions).
-        case $outputFormat in
-            jsonpath=*conditions*) canned jobConditions ;;
-            *)
+        # The first asks for no output format at all, which is what tells them apart.
+        case $jsonpath in
+            '')
                 [ -f "$state/job-exists" ] || [ -f "$state/applied-job" ] ||
                     fail "Error from server (NotFound): jobs.batch \"${verb[2]}\" not found"
                 printf 'job.batch/%s\n' "${verb[2]}"
                 ;;
+            "$QUERY_JOB_CONDITIONS") canned jobConditions ;;
+            *) failUnknownQuery "$jsonpath" ;;
         esac
         ;;
 
     "get pod" | "get pod "*)
-        # Which answer a query wants is decided by the shape of the jsonpath, so the launcher
-        # can change what it asks for without this fake having to agree field by field.
-        case $outputFormat in
-            *metadata.name*) canned podName ;;
-            *PodScheduled*) canned schedulingFacts ;;
+        case $jsonpath in
+            "$QUERY_POD_NAME") canned podName ;;
+            "$QUERY_SCHEDULING_FACTS") canned schedulingFacts ;;
             # The probe asks about one named Pod per node and the launcher about the run's, so
-            # a per-name answer wins over the shared one where a test supplied it.
-            *)
+            # a per-name answer wins over the shared one where a test supplied it. The two ask
+            # for different fields and share the fixture: a probe fixture carries the four the
+            # probe reads, a launcher fixture the nine the launcher does.
+            "$QUERY_POD_FACTS" | "$QUERY_PROBE_POD_FACTS")
                 if [ -n "${verb[2]-}" ] && [ -f "$state/podFacts.${verb[2]}" ]; then
                     canned "podFacts.${verb[2]}"
                 else
                     canned podFacts
                 fi
                 ;;
+            *) failUnknownQuery "$jsonpath" ;;
         esac
         ;;
 
     # Cluster-scoped reads and writes, which only probe-nodes.sh and the launcher's capability
-    # preflight make. Which answer a `get nodes` wants is again decided by the jsonpath: the
-    # name and the image together is the launcher asking which nodes it may schedule onto, the
-    # name alone is the probe asking what there is to probe, and the image alone is the probe
-    # counting what a run could reach.
+    # preflight make. Which answer a `get nodes` wants is again the jsonpath: the name and the
+    # image together is the launcher asking which nodes it may schedule onto, the name alone is
+    # the probe asking what there is to probe, and the image alone is the probe counting what a
+    # run could reach.
     "get nodes")
         [ "${KUBECTL_FAKE_NODES_UNREADABLE:-no}" = no ] ||
             fail 'Error from server (Forbidden): nodes is forbidden: User "fake" cannot list resource "nodes" at the cluster scope'
-        case $outputFormat in
-            *metadata.name*annotations*) canned capableNodes ;;
-            *metadata.name*) canned nodeNames ;;
-            *) canned capableImages ;;
+        case $jsonpath in
+            "$QUERY_CAPABLE_NODES") canned capableNodes ;;
+            "$QUERY_NODE_NAMES") canned nodeNames ;;
+            "$QUERY_CAPABLE_IMAGES") canned capableImages ;;
+            *) failUnknownQuery "$jsonpath" ;;
         esac
         ;;
 
-    "get node "*) canned "nodeCapability.${verb[2]}" ;;
+    "get node "*)
+        case $jsonpath in
+            "$QUERY_NODE_CAPABILITY") canned "nodeCapability.${verb[2]}" ;;
+            *) failUnknownQuery "$jsonpath" ;;
+        esac
+        ;;
 
     "label node "*)
         printf '%s\n' "${verb[2]} ${verb[3]-}" >>"$state/labels"
@@ -504,7 +553,12 @@ case "${verb[*]-}" in
         printf 'pod "%s" deleted\n' "${verb[2]}"
         ;;
 
-    "get events") canned jobCreateFailure ;;
+    "get events")
+        case $jsonpath in
+            "$QUERY_JOB_CREATE_FAILURE") canned jobCreateFailure ;;
+            *) failUnknownQuery "$jsonpath" ;;
+        esac
+        ;;
 
     logs*)
         # The Pod name is still in "$@": the flag loop stops as soon as it knows the verb is

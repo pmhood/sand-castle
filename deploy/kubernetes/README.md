@@ -113,6 +113,11 @@ and refuses an empty value rather than rendering `sandcastle-` and a Job that co
 next one. `launch-run.sh` adds no validation of its own on top of it; it calls it and inherits
 its messages.
 
+Unlike `launch-run.sh` above, an argument passed to `render-job.sh` directly wins over an
+already-set environment variable of the same name -- the argument is the more specific
+statement of intent, and an environment variable that is set but empty counts as not set at
+all (#64).
+
 The one thing the launcher checks that these commands do not is the **agent**: it takes
 `[agent]` as a third argument and compares it with what `job.yaml` sets, rather than
 substituting it. `AGENT` is deliberately not a placeholder (see "Running Codex instead of

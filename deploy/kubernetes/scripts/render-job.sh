@@ -21,6 +21,10 @@
 #
 #   ./deploy/kubernetes/scripts/render-job.sh run-001 octocat/Hello-World 1 | kubectl apply -f -
 #
+# Each of the three inputs may come from either form. A passed argument wins over an
+# already-set environment variable of the same name; an environment variable that is set but
+# empty counts as not set at all (#64).
+#
 # No credential is an input here, and none appears in the output: credentials reach the Pod
 # only through the secretKeyRef entries job.yaml already carries (§15, §52).
 
@@ -44,11 +48,16 @@ die() {
     exit 1
 }
 
-# The environment takes precedence over the arguments, as in images/agent/scripts/smoke.sh.
+# A passed argument wins over an already-set environment variable of the same name -- the
+# argument is the more specific statement of intent (#64). This is *not* what
+# images/agent/scripts/smoke.sh's own parseArgs does: there, an already-exported environment
+# variable wins over its arguments, so the two scripts now genuinely differ. `${1:-default}`,
+# not `${1-default}`, in both branches: an empty value, argument or environment, is treated the
+# same as an unset one (#26).
 parseArgs() {
-    RUN_ID=${RUN_ID:-${1-}}
-    GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-${2-}}
-    GITHUB_ISSUE_NUMBER=${GITHUB_ISSUE_NUMBER:-${3-}}
+    RUN_ID=${1:-${RUN_ID:-}}
+    GITHUB_REPOSITORY=${2:-${GITHUB_REPOSITORY:-}}
+    GITHUB_ISSUE_NUMBER=${3:-${GITHUB_ISSUE_NUMBER:-}}
 }
 
 # An empty value must never be substituted. A Job with an empty run ID is not merely wrong, it

@@ -919,6 +919,16 @@ containerd fills in none of it, which is why the launcher reads the exit code as
 which reading it used -- and `check-jsonpath.sh` validates against whichever cluster you point it
 at, so it says the queries fit *that* one and not that they fit the next version of it.
 
+**Both extractors still only parse one spelling of `-o jsonpath=`.** They match literally
+rather than parse shell, deliberately, since these are two known files rather than arbitrary
+scripts (`check-jsonpath.sh:89-104`). A query written some other way -- double-quoted, unquoted,
+built from a variable -- is still not itself understood. What changed is that this no longer
+happens silently (#41): a script with five recognised queries and one that is not used to still
+look, and pass, like one with five. Both extractors now count every `-o jsonpath=` invocation a
+script makes and require that count to match how many they could actually parse, so a spelling
+neither understands fails loudly -- the bats suite or `check-jsonpath.sh`, naming the line -- at
+the point it is introduced, instead of being quietly left out of both.
+
 ### Against the real cluster
 
 A server dry-run is the useful extra that CI cannot run. It needs the namespace to exist,
